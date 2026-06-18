@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install optional deps
+        run: pip install pygments
+
+      - name: Byte-compile all skill scripts
+        run: |
+          python -m compileall -q skills
+
+      - name: Run skill test suites
+        run: |
+          set -e
+          found=0
+          for tests in skills/*/tests; do
+            [ -d "$tests" ] || continue
+            found=1
+            echo "::group::$tests"
+            python -m unittest discover -s "$tests" -v
+            echo "::endgroup::"
+          done
+          if [ "$found" = 0 ]; then echo "no test suites found"; fi

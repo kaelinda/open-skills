@@ -145,7 +145,9 @@ CSS constructs that cannot be represented as inline element styles, or selectors
 Themes are grouped into **packs**, discovered by convention so new groups need no code change:
 
 - `mdnice` — the built-in inline pack (`references/mdnice-themes.json` + `references/mdnice-themes/`).
-- any `references/<pack>-themes.json` + `references/<pack>/` — an auto-discovered stylesheet pack (`theme-hub`, and e.g. `mweb-theme`). `discover_packs` globs `references/*-themes.json` (excluding `mdnice`); `load_pack_themes` loads them all and tags each theme with its `pack`, which `pack_theme_css` uses to resolve `references/<pack>/<file>`. Theme identity is `pack`+`slug`, so packs can reuse slugs; `resolve_themes` accepts `pack:slug` to disambiguate.
+- any `references/<pack>-themes.json` + `references/<pack>/` — an auto-discovered stylesheet pack (`theme-hub`, and e.g. `mweb-theme`).
+
+> Naming note: extension packs keep the CSS dir at `references/<pack>/` (e.g. `theme-hub/`), while the built-in `mdnice` pack's per-theme CSS lives under `references/mdnice-themes/` (the `-themes` suffix). `mdnice` is intentionally special-cased — it is the inline engine resolved via the `cssFile` pointer in its catalog, not through pack discovery — so the asymmetry is expected. `discover_packs` globs `references/*-themes.json` (excluding `mdnice`); `load_pack_themes` loads them all and tags each theme with its `pack`, which `pack_theme_css` uses to resolve `references/<pack>/<file>`. Theme identity is `pack`+`slug`, so packs can reuse slugs; `resolve_themes` accepts `pack:slug` to disambiguate.
 
 The `add-theme` command vendors a CSS file/URL into a pack and registers it: `detect_wrapper_class` (scans for `.markdown-body`/`.heti`/`.typo`/`#write`) and `detect_appearance` (root/body background luma) fill in the metadata, with CLI overrides and a `--manifest` batch mode for adding a whole group.
 

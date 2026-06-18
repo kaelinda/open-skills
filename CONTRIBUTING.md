@@ -45,5 +45,15 @@ docs: 📝 更新 README 安装说明
 ## 二、目录约定
 
 - 每个技能独立放在 `skills/<skill-name>/`。
-- 技能入口为该目录下的 `SKILL.md`；引用资源放在子目录（如 `references/`、`scripts/`、`assets/`）。
+- 技能入口为该目录下的 `SKILL.md`（含 `name` / `description` frontmatter）；引用资源放在子目录（如 `references/`、`scripts/`、`assets/`）。
 - 与具体技能无关的仓库级文档放在仓库根目录。
+
+## 三、测试与 CI
+
+- 技能的测试放在 `skills/<skill-name>/tests/`，用标准库 `unittest`（免额外依赖），可单独运行：
+
+  ```bash
+  python3 -m unittest discover -s skills/<skill-name>/tests
+  ```
+
+- CI（`.github/workflows/ci.yml`）会在 push / PR 时对 `skills/` 下脚本做字节编译，并自动发现并运行每个技能的 `tests/` 套件。新增技能时按同样约定放置测试即可被纳入。
