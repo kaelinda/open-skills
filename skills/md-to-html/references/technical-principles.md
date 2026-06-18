@@ -212,6 +212,21 @@ browser and copy — the rendered SVG is copied along, matching MDNice's workflo
 parsing, so metadata lines do not render as a stray paragraph (the opening `---`
 would otherwise be parsed as an `<hr>`). It also runs before title derivation.
 
+## Footnotes
+
+`convert_links_to_footnotes` runs in `build_theme_document` on the rendered body,
+after Markdown parsing and before the engine document is assembled. It rewrites
+each `<a href>` into the bare link text plus a superscript `[N]` marker, and
+appends a 引用链接 reference list (`<section class="footnotes">`) carrying the
+URLs. Because it consumes already-escaped generated HTML, it normalizes values
+with `html.escape(html.unescape(x))` so a URL like `…?a=1&b=2` is escaped exactly
+once. It is **on by default for the inline (WeChat/Zhihu paste) output** — those
+platforms drop inline link URLs, so footnotes preserve them — and **off for
+stylesheet documents**, where links stay clickable. `--footnotes` / `--no-footnotes`
+force it either way. For the inline engine the appended section sits inside
+`article#nice`, so theme text styles apply; the markers carry their own inline
+colour so they survive whether or not a theme styles `.footnote-ref`.
+
 ## Output Modes
 
 Single-theme mode is the default for publishable output:

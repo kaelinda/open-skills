@@ -144,5 +144,36 @@ class RenderPreview(unittest.TestCase):
         self.assertIn("<iframe", html)
 
 
+class Footnotes(unittest.TestCase):
+    def test_convert_links_to_footnotes_pure(self):
+        body = '<p>see <a href="https://e.com/x?a=1&amp;b=2">site</a> here</p>'
+        out = m.convert_links_to_footnotes(body)
+        self.assertIn('<sup class="footnote-ref"', out)  # marker added
+        self.assertNotIn("<a href", out)                 # link removed
+        self.assertIn("引用链接", out)                    # reference list appended
+        self.assertIn("site: https://e.com/x?a=1&amp;b=2", out)  # single, correct escaping
+        self.assertNotIn("&amp;amp;", out)               # no double escaping
+
+    def test_convert_links_noop_without_links(self):
+        body = "<p>no links here</p>"
+        self.assertEqual(m.convert_links_to_footnotes(body), body)
+
+    def test_inline_footnotes_default_on(self):
+        html = render("极客黑")  # SAMPLE_MD has [链接](https://e.com)
+        self.assertIn('<sup class="footnote-ref"', html)
+        self.assertIn("引用链接", html)
+        self.assertNotIn('<a href="https://e.com"', html)
+
+    def test_no_footnotes_flag(self):
+        html = render("极客黑", "--no-footnotes")
+        self.assertNotIn('<sup class="footnote-ref"', html)
+        self.assertIn('href="https://e.com"', html)  # link kept
+
+    def test_stylesheet_footnotes_default_off(self):
+        html = render("github-light")  # stylesheet engine -> footnotes off by default
+        self.assertNotIn('<sup class="footnote-ref"', html)
+        self.assertIn('href="https://e.com"', html)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

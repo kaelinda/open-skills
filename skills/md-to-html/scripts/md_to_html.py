@@ -1794,6 +1794,59 @@ body { overflow-wrap: break-word; }
 """
 
 
+FOOTNOTE_LINK_RE = re.compile(r'<a\s+href="([^"]*)">(.*?)</a>', re.S)
+
+
+def _strip_tags(fragment: str) -> str:
+    return re.sub(r"<[^>]+>", "", fragment)
+
+
+def convert_links_to_footnotes(body_html: str) -> str:
+    """Turn inline `<a href>` links into footnote references: keep the link text,
+    append a superscript [N] marker, and collect the URLs into a reference list
+    appended at the end of the article. Mirrors MDNice's footnote mode, which
+    preserves URLs that WeChat/Zhihu strip from inline links. Returns the body
+    unchanged when it has no links."""
+    notes: list[tuple[str, str]] = []  # (label, url) in order of appearance
+
+    def repl(match: re.Match[str]) -> str:
+        # href/inner come from already-escaped generated HTML; normalize to a single
+        # correct escaping (unescape -> escape) so e.g. "&amp;" is not shown literally.
+        url = html.escape(html.unescape(match.group(1)))
+        inner = match.group(2)
+        label = html.escape(html.unescape(clean_text(_strip_tags(inner)))) or url
+        notes.append((label, url))
+        index = len(notes)
+        return (
+            f"{inner}"
+            f'<sup class="footnote-ref" style="font-size: 75%; line-height: 0; '
+            f'vertical-align: super; color: #1e6bb8;">[{index}]</sup>'
+        )
+
+    new_body = FOOTNOTE_LINK_RE.sub(repl, body_html)
+    if not notes:
+        return body_html
+
+    items = []
+    for index, (label, url) in enumerate(notes, start=1):
+        # label/url are already HTML-escaped by repl().
+        items.append(
+            '<p class="footnote-item" style="margin: 4px 0; font-size: 14px; '
+            'line-height: 1.7; word-break: break-all; color: #888;">'
+            f'<span style="color: #1e6bb8;">[{index}]</span> '
+            f"{label}: {url}</p>"
+        )
+    footnotes_section = (
+        '<section class="footnotes" style="margin-top: 32px;">'
+        '<hr style="border: none; border-top: 1px solid #e0e0e0; margin: 0 0 12px;">'
+        '<p class="footnotes-title" style="margin: 0 0 8px; font-size: 15px; '
+        'font-weight: bold; color: #666;">引用链接</p>'
+        + "".join(items)
+        + "</section>"
+    )
+    return new_body + footnotes_section
+
+
 def article_document(
     title: str,
     body_html: str,
@@ -1947,13 +2000,20 @@ def build_theme_document(
     code_theme: str | None = None,
     mermaid_theme: str | None = None,
     mode: str = "auto",
+    footnotes: bool | None = None,
 ) -> str:
     """Dispatch a theme to the right engine and output mode.
 
     mode: "auto" (MDNice -> inline, hub -> stylesheet), "inline" (force inline),
     or "stylesheet" (force standalone <style> document). Every MDNice theme
     supports both inline and stylesheet output; hub themes are stylesheet-only and
-    fall back to stylesheet if inline is requested."""
+    fall back to stylesheet if inline is requested.
+
+    footnotes: None = auto (on for the inline-paste output, off for stylesheet
+    documents where links stay clickable), True/False to force."""
+    is_stylesheet_output = str(theme.get("engine")) == "stylesheet" or mode == "stylesheet"
+    use_footnotes = footnotes if footnotes is not None else not is_stylesheet_output
+
     if str(theme.get("engine")) == "stylesheet":
         if mode == "inline":
             print(
@@ -1962,9 +2022,13 @@ def build_theme_document(
                 file=sys.stderr,
             )
         body = render_markdown(markdown_text, flavor="semantic")
+        if use_footnotes:
+            body = convert_links_to_footnotes(body)
         return stylesheet_document(title, body, theme, code_theme, mermaid_theme)
     # MDNice theme: inline by default; "stylesheet" emits the #nice CSS as a <style> block.
     body = render_markdown(markdown_text, flavor="mdnice")
+    if use_footnotes:
+        body = convert_links_to_footnotes(body)
     if mode == "stylesheet":
         return mdnice_stylesheet_document(title, body, theme, code_theme, mermaid_theme)
     return article_document(title, body, theme, code_theme, mermaid_theme)
@@ -1977,6 +2041,7 @@ def build_preview_page(
     code_theme: str | None = None,
     mermaid_theme: str | None = None,
     mode: str = "auto",
+    footnotes: bool | None = None,
 ) -> str:
     buttons: list[str] = []
     panels: list[str] = []
@@ -1995,7 +2060,8 @@ def build_preview_page(
             "</button>"
         )
         srcdoc = html.escape(
-            build_theme_document(title, markdown_text, theme, code_theme, mermaid_theme, mode), quote=True
+            build_theme_document(title, markdown_text, theme, code_theme, mermaid_theme, mode, footnotes),
+            quote=True,
         )
         panels.append(
             f'<section class="{panel_class}" id="panel-{index}" role="tabpanel" '
@@ -2173,11 +2239,12 @@ def render_command(args: argparse.Namespace) -> None:
     code_theme = getattr(args, "code_theme", None)
     mermaid_theme = getattr(args, "mermaid_theme", None)
     mode = getattr(args, "mode", "auto")
+    footnotes = getattr(args, "footnotes", None)
     if len(themes) == 1 and not args.preview_tabs:
-        output_html = build_theme_document(title, markdown_text, themes[0], code_theme, mermaid_theme, mode)
+        output_html = build_theme_document(title, markdown_text, themes[0], code_theme, mermaid_theme, mode, footnotes)
         output_label = "publish HTML"
     else:
-        output_html = build_preview_page(title, markdown_text, themes, code_theme, mermaid_theme, mode)
+        output_html = build_preview_page(title, markdown_text, themes, code_theme, mermaid_theme, mode, footnotes)
         output_label = "tabbed preview"
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(output_html, encoding="utf-8")
@@ -2261,6 +2328,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["auto", "inline", "stylesheet"],
         default="auto",
         help="output mode: auto (MDNice->inline, hub->stylesheet); inline (CSS on style attrs, WeChat/Zhihu paste); stylesheet (theme CSS in a <style> block, web/blog)",
+    )
+    render.add_argument(
+        "--footnotes",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="convert inline links to footnotes (default: on for inline paste output, off for stylesheet documents)",
     )
     render.add_argument("--preview-tabs", action="store_true", help="force a tabbed preview even when one theme is selected")
     render.add_argument("--refresh-missing-styles", action="store_true")
