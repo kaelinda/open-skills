@@ -1,0 +1,8 @@
+interface:
+  display_name: "MD to HTML"
+  short_description: "Render Markdown with MDNice theme previews"
+  brand_color: "#2563EB"
+  default_prompt: "Use $md-to-html to render this Markdown article as a tabbed HTML preview with one to five MDNice themes."
+
+policy:
+  allow_implicit_invocation: true
