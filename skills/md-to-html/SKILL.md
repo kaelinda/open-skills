@@ -7,10 +7,10 @@ description: Use when converting Markdown articles to clean publishable HTML wit
 
 Convert a Markdown article into standalone HTML. Two theme engines are available:
 
-- **MDNice (`inline`)**: 30 cached MDNice layout themes whose CSS is converted into inline `style` attributes on an `article#nice` DOM. Best for pasting into WeChat Official Account / Zhihu without losing styling.
+- **MDNice (`inline`)**: 30 cached MDNice layout themes. By default their CSS is converted into inline `style` attributes on an `article#nice` DOM — best for pasting into WeChat Official Account / Zhihu without losing styling.
 - **Stylesheet (`stylesheet`)**: 14 standalone open-source CSS themes (GitHub Light/Dark, Sakura, Water, Simple, LaTeX, Tufte, Typo, Smartisan, Heti, MVP, new.css, sp.css, concrete) embedded verbatim in a `<style>` block over semantic HTML. Best for blogs / standalone web articles / Typora-style publishing.
 
-Default to one clean publishable HTML document for a single requested theme; use tabbed preview only when the user explicitly asks to compare or selects multiple themes. Both engines share the same Markdown parser, code highlighting, and mermaid pipeline; the engine is chosen automatically from the selected theme.
+Every MDNice theme can be rendered in **both** output modes via `--mode` (default `auto`): `inline` (CSS on `style` attributes; WeChat/Zhihu paste) or `stylesheet` (the same `#nice`-scoped CSS emitted as a `<style>` block; smaller, cleaner HTML for the web). Hub themes are stylesheet-only (their variable/`@media`-driven CSS can't be faithfully inlined). Default to one clean publishable HTML document for a single requested theme; use tabbed preview only when the user explicitly asks to compare or selects multiple themes. Both engines share the same Markdown parser, code highlighting, and mermaid pipeline.
 
 ## Quick Start
 
@@ -18,6 +18,8 @@ Default to one clean publishable HTML document for a single requested theme; use
 python3 skills/md-to-html/scripts/md_to_html.py list-themes
 # MDNice inline theme (WeChat/Zhihu paste)
 python3 skills/md-to-html/scripts/md_to_html.py render article.md --themes 极客黑 --output article.html
+# MDNice theme as a standalone stylesheet document (web/blog instead of paste)
+python3 skills/md-to-html/scripts/md_to_html.py render article.md --themes 极客黑 --mode stylesheet --output article.html
 # standalone stylesheet theme (blog / web article), selected by slug
 python3 skills/md-to-html/scripts/md_to_html.py render article.md --themes github-light --output article.html
 python3 skills/md-to-html/scripts/md_to_html.py render article.md --themes 极客黑,橙蓝风 --output article-preview.html
@@ -60,9 +62,16 @@ python3 skills/md-to-html/scripts/md_to_html.py fetch-themes --include-styles
 
 Never write MDNice bearer tokens into skill files, references, command examples, or final artifacts.
 
+`fetch-themes --include-styles` and `--cache-styles` store each theme's CSS as one file under `references/mdnice-themes/` and keep only a `cssFile` pointer in `mdnice-themes.json`, so the catalog stays ~20KB (metadata only) and never balloons as themes are added. To migrate an older catalog that still inlines `styleCss`, run once:
+
+```bash
+python3 skills/md-to-html/scripts/md_to_html.py split-catalog
+```
+
 ## References
 
-- `references/mdnice-themes.json`: cached MDNice theme metadata and any CSS that was reachable when refreshed.
+- `references/mdnice-themes.json`: slim MDNice catalog — metadata + per-theme `cssFile` pointer (~20KB).
+- `references/mdnice-themes/`: one CSS file per MDNice theme (e.g. `13-极客黑.css`); read lazily at render time. Legacy inline `styleCss` in the catalog is still honoured.
 - `references/theme-hub-themes.json`: stylesheet-engine theme catalog (slug, wrapper class, appearance, paired code/mermaid theme, license, source).
 - `references/theme-hub/`: vendored CSS theme files (`content-platform/`, `minimal/`) plus `NOTICE.md` provenance/licensing.
 - `references/mdnice-api.md`: endpoint notes, auth requirements, and known side effects.
@@ -74,6 +83,7 @@ Never write MDNice bearer tokens into skill files, references, command examples,
 - Use one theme for clean publishable HTML. Use 2-5 themes only when the user clearly wants tabbed comparison preview.
 - Choose the engine by destination: MDNice (`inline`) themes for WeChat/Zhihu paste; stylesheet themes (`github-light`, `sakura`, …) for blogs / standalone web pages.
 - Code blocks and mermaid diagrams are paired to the theme automatically; only pass `--code-theme` / `--mermaid-theme` when the user wants a different pairing.
-- If an MDNice theme has no cached CSS, rerun with `MDNICE_TOKEN` and `MDNICE_OUT_ID`, or pick a theme that has `styleCss`. Stylesheet themes carry CSS in vendored files and never need credentials.
+- MDNice themes default to `inline`; pass `--mode stylesheet` to emit the theme as a standalone `<style>` document for the web. Hub themes ignore `--mode inline` (stylesheet-only) and print a note.
+- If an MDNice theme has no cached CSS (no `cssFile` and no inline `styleCss`), rerun with `MDNICE_TOKEN` and `MDNICE_OUT_ID`. Stylesheet themes carry CSS in vendored files and never need credentials.
 - The renderer emits MDNice-like DOM hooks for the inline engine and plain semantic HTML for the stylesheet engine; it does not need generic Markdown libraries for the main conversion path.
 - Inline rendering supports MDNice's cached `#nice` selectors, descendant/child/adjacent selectors, `nth-of-type`, and `::before`/`::after` content as generated inline spans. Unsupported CSS constructs are skipped instead of emitting a theme stylesheet.

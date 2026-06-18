@@ -220,6 +220,90 @@ def theme_identity(theme: dict[str, Any]) -> Any:
     return ("slug", str(theme.get("slug") or theme.get("name") or ""))
 
 
+# --- Per-theme CSS file storage --------------------------------------------
+# The MDNice catalog used to inline each theme's ~40KB `styleCss` string, so the
+# JSON ballooned to >1MB (98% CSS). The CSS now lives in one file per theme under
+# references/mdnice-themes/, and the catalog keeps only metadata + a `cssFile`
+# pointer (~450 bytes/theme), so it never balloons. `styleCss` is still honoured
+# inline for backward compatibility with older catalogs.
+MDNICE_CSS_SUBDIR = "mdnice-themes"
+
+
+def catalog_dir_for(path: Path) -> Path:
+    return Path(path).resolve().parent
+
+
+def slugify_theme_name(name: Any) -> str:
+    s = re.sub(r"\s+", "", str(name or ""))          # drop whitespace incl. newlines
+    s = re.sub(r'[/\\:*?"<>|]+', "", s)               # drop filesystem-unsafe chars
+    return s[:40] or "theme"
+
+
+def theme_css_filename(theme: dict[str, Any]) -> str:
+    tid = theme.get("themeId")
+    slug = slugify_theme_name(theme.get("name"))
+    base = f"{tid}-{slug}" if tid is not None else slug
+    return f"{MDNICE_CSS_SUBDIR}/{base}.css"
+
+
+def theme_has_style(theme: dict[str, Any]) -> bool:
+    return bool(theme.get("styleCss")) or bool(theme.get("cssFile"))
+
+
+def read_theme_css(catalog_dir: Path, theme: dict[str, Any]) -> str:
+    """Resolve a theme's CSS: inline `styleCss` wins (legacy/in-memory), else read
+    the per-theme `cssFile` relative to the catalog directory."""
+    inline = theme.get("styleCss")
+    if inline:
+        return str(inline)
+    rel = theme.get("cssFile")
+    if not rel:
+        return ""
+    css_path = catalog_dir / rel
+    return css_path.read_text(encoding="utf-8") if css_path.exists() else ""
+
+
+def hydrate_theme_css(theme: dict[str, Any], catalog_dir: Path) -> dict[str, Any]:
+    """Populate in-memory `styleCss` from `cssFile` so downstream rendering code
+    can stay unchanged. No-op for themes that already carry inline CSS."""
+    if not theme.get("styleCss") and theme.get("cssFile"):
+        css = read_theme_css(catalog_dir, theme)
+        if css:
+            theme["styleCss"] = css
+    return theme
+
+
+def externalize_theme_css(catalog_dir: Path, theme: dict[str, Any]) -> bool:
+    """Move an inline `styleCss` string out to a per-theme CSS file and replace it
+    with a `cssFile` pointer. Returns True if a write happened."""
+    css = theme.get("styleCss")
+    if not css:
+        return False
+    rel = theme_css_filename(theme)
+    target = catalog_dir / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(str(css), encoding="utf-8")
+    theme["cssFile"] = rel
+    theme.pop("styleCss", None)
+    return True
+
+
+def split_catalog(args: argparse.Namespace) -> None:
+    """One-off migration: externalize every inline `styleCss` into a per-theme CSS
+    file and slim the catalog to metadata + `cssFile`. Idempotent."""
+    catalog = load_catalog(args.catalog)
+    catalog_dir = catalog_dir_for(args.catalog)
+    themes = catalog.get("themes") or []
+    moved = sum(1 for theme in themes if isinstance(theme, dict) and externalize_theme_css(catalog_dir, theme))
+    catalog["styleCount"] = sum(1 for theme in themes if isinstance(theme, dict) and theme_has_style(theme))
+    write_catalog(args.catalog, catalog)
+    print(
+        f"split {moved} theme styles into {catalog_dir / MDNICE_CSS_SUBDIR}; "
+        f"catalog now {args.catalog}",
+        file=sys.stderr,
+    )
+
+
 def build_catalog(args: argparse.Namespace) -> None:
     themes = fetch_theme_list(args.page_size, args.strict_tls)
     existing_by_id: dict[int, dict[str, Any]] = {}
@@ -234,17 +318,19 @@ def build_catalog(args: argparse.Namespace) -> None:
         except Exception:
             existing_by_id = {}
 
+    catalog_dir = catalog_dir_for(args.output)
     for theme in themes:
         previous = existing_by_id.get(theme.get("themeId"))
         if previous:
-            for key in ("styleCss", "styleDataVersion", "styleFetchedAt", "styleError"):
+            # Preserve the per-file pointer (and legacy inline CSS / metadata) from
+            # an existing catalog so a no-auth refresh never drops cached styles.
+            for key in ("cssFile", "styleCss", "styleDataVersion", "styleFetchedAt", "styleError"):
                 if previous.get(key):
                     theme[key] = previous[key]
 
     token = os.environ.get(args.token_env, "").strip()
     out_id = args.out_id or os.environ.get("MDNICE_OUT_ID", "").strip()
 
-    style_count = 0
     if args.include_styles:
         if not token:
             raise MdniceError(f"--include-styles requires {args.token_env}")
@@ -255,14 +341,17 @@ def build_catalog(args: argparse.Namespace) -> None:
             try:
                 theme.update(fetch_theme_style(theme_id, out_id, token, args.strict_tls))
                 theme.pop("styleError", None)
-                style_count += 1
                 print(f"[{index}/{len(themes)}] fetched CSS for {theme_id} {theme.get('name')}", file=sys.stderr)
             except Exception as exc:  # noqa: BLE001 - preserve per-theme failures in the catalog.
                 theme["styleError"] = str(exc)
                 print(f"[{index}/{len(themes)}] failed CSS for {theme_id}: {exc}", file=sys.stderr)
             time.sleep(args.delay)
-    else:
-        style_count = sum(1 for theme in themes if theme.get("styleCss"))
+
+    # Always store CSS as one file per theme; the catalog keeps only a `cssFile`
+    # pointer so the JSON never balloons (metadata is ~450 bytes/theme).
+    for theme in themes:
+        externalize_theme_css(catalog_dir, theme)
+    style_count = sum(1 for theme in themes if theme_has_style(theme))
 
     catalog = {
         "source": "mdnice",
@@ -275,10 +364,11 @@ def build_catalog(args: argparse.Namespace) -> None:
         },
         "themeCount": len(themes),
         "styleCount": style_count,
+        "cssDir": MDNICE_CSS_SUBDIR,
         "themes": themes,
     }
     write_catalog(args.output, catalog)
-    print(f"wrote {len(themes)} themes, {style_count} with CSS: {args.output}", file=sys.stderr)
+    print(f"wrote {len(themes)} themes, {style_count} with CSS files under {catalog_dir / MDNICE_CSS_SUBDIR}", file=sys.stderr)
 
 
 def theme_label(theme: dict[str, Any]) -> str:
@@ -296,7 +386,7 @@ def theme_label(theme: dict[str, Any]) -> str:
     author = theme.get("applicantUsername")
     if author:
         bits.append(f"by {author}")
-    if theme.get("styleCss"):
+    if theme_has_style(theme):
         bits.append("css")
     elif theme.get("styleError"):
         bits.append("style-error")
@@ -312,13 +402,13 @@ def list_themes(args: argparse.Namespace) -> None:
             theme
             for theme in themes
             if (not query or query in json.dumps(theme, ensure_ascii=False).casefold())
-            and (not args.with_style_only or bool(theme.get("styleCss")) or str(theme.get("engine")) == "stylesheet")
+            and (not args.with_style_only or theme_has_style(theme) or str(theme.get("engine")) == "stylesheet")
         ]
         print(json.dumps(filtered, ensure_ascii=False, indent=2))
         return
 
     for theme in themes:
-        if args.with_style_only and not theme.get("styleCss") and str(theme.get("engine")) != "stylesheet":
+        if args.with_style_only and not theme_has_style(theme) and str(theme.get("engine")) != "stylesheet":
             continue
         haystack = json.dumps(theme, ensure_ascii=False).casefold()
         if query and query not in haystack:
@@ -1482,6 +1572,26 @@ def nth_of_type_matches(node: HtmlNode, expression: str) -> bool:
     return False
 
 
+# Page-level compatibility CSS for the #nice article DOM (reset, responsive,
+# tables, code overflow). Shared by both MDNice output modes. Contains literal
+# braces, so it is injected as a value (never re-parsed by f-strings).
+NICE_BASE_CSS = """\
+html, body { margin: 0; padding: 0; background: #fff; }
+body { overflow-wrap: break-word; }
+#nice { box-sizing: border-box; min-height: 100vh; margin: 0 auto; max-width: 760px; }
+#nice img { max-width: 100%; height: auto; }
+#nice pre { overflow-x: auto; }
+#nice h1, #nice h2, #nice h3, #nice h4, #nice h5, #nice h6 { word-break: break-word; }
+#nice h1 .content, #nice h2 .content, #nice h3 .content, #nice h4 .content, #nice h5 .content, #nice h6 .content { min-width: 0; }
+#nice .table-container { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+#nice .table-container table { border-collapse: collapse; width: 100%; }
+/* Layout themes apply `display:-webkit-box` to <code>; the paired code theme
+   forces `display:block; white-space:pre`; these are a non-inline safety net. */
+#nice pre.custom { overflow-x: auto; }
+#nice pre.custom code { white-space: pre; }
+"""
+
+
 def article_document(
     title: str,
     body_html: str,
@@ -1517,24 +1627,55 @@ def article_document(
 <title>{safe_title}</title>
 {mermaid_runtime_html}
 <style>
-html, body {{ margin: 0; padding: 0; background: #fff; }}
-body {{ overflow-wrap: break-word; }}
-#nice {{ box-sizing: border-box; min-height: 100vh; margin: 0 auto; max-width: 760px; }}
-#nice img {{ max-width: 100%; height: auto; }}
-#nice pre {{ overflow-x: auto; }}
-#nice h1, #nice h2, #nice h3, #nice h4, #nice h5, #nice h6 {{ word-break: break-word; }}
-#nice h1 .content, #nice h2 .content, #nice h3 .content, #nice h4 .content, #nice h5 .content, #nice h6 .content {{ min-width: 0; }}
-#nice .table-container {{ overflow-x: auto; -webkit-overflow-scrolling: touch; }}
-#nice .table-container table {{ border-collapse: collapse; width: 100%; }}
-/* Layout themes apply `display:-webkit-box` to <code>; with token spans plus
-   <br> that would collapse lines onto one row. The paired code theme forces
-   `display:block; white-space:pre` inline; these are a non-inline safety net. */
-#nice pre.custom {{ overflow-x: auto; }}
-#nice pre.custom code {{ white-space: pre; }}
-</style>
+{NICE_BASE_CSS}</style>
 </head>
 <body>
 {article_html}
+</body>
+</html>"""
+
+
+def mdnice_stylesheet_document(
+    title: str,
+    body_html: str,
+    theme: dict[str, Any],
+    code_theme: str | None = None,
+    mermaid_theme: str | None = None,
+) -> str:
+    """Standalone-stylesheet output for an MDNice theme: keep the `#nice` DOM but
+    emit the theme CSS (which is already `#nice`-scoped) in a `<style>` block
+    instead of flattening it onto inline `style` attributes. Same theme, smaller
+    and cleaner HTML, better for web/blog publishing — but it does NOT survive a
+    WeChat/Zhihu paste (use the default inline mode for that)."""
+    theme_css = str(theme.get("styleCss") or "")
+    highlight_css = str(theme.get("highlightTheme") or "")
+    if highlight_css:
+        theme_css = f"{theme_css}\n{highlight_css}"
+    code_key, mmd_theme = resolve_theme_styles(theme, code_theme, mermaid_theme)
+    code_css = build_code_theme_css(code_key)
+    mermaid_runtime_html = mermaid_runtime(mmd_theme) if 'data-mermaid="1"' in body_html else ""
+    safe_title = html.escape(title)
+    name = html.escape(clean_text(str(theme.get("name") or "")))
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{safe_title}</title>
+{mermaid_runtime_html}
+<style>
+{NICE_BASE_CSS}</style>
+<style>
+/* ===== mdnice theme: {name} (standalone stylesheet) ===== */
+{theme_css}
+</style>
+<style>
+/* ===== paired code-highlight theme: {html.escape(code_key)} ===== */
+{code_css}
+</style>
+</head>
+<body>
+<article id="nice">{body_html}</article>
 </body>
 </html>"""
 
@@ -1603,14 +1744,27 @@ def build_theme_document(
     theme: dict[str, Any],
     code_theme: str | None = None,
     mermaid_theme: str | None = None,
+    mode: str = "auto",
 ) -> str:
-    """Dispatch a single theme to the right engine, rendering the matching Markdown
-    flavor: stylesheet -> semantic HTML + <style>; MDNice (inline) -> wrapper DOM
-    with inline styles."""
+    """Dispatch a theme to the right engine and output mode.
+
+    mode: "auto" (MDNice -> inline, hub -> stylesheet), "inline" (force inline),
+    or "stylesheet" (force standalone <style> document). Every MDNice theme
+    supports both inline and stylesheet output; hub themes are stylesheet-only and
+    fall back to stylesheet if inline is requested."""
     if str(theme.get("engine")) == "stylesheet":
+        if mode == "inline":
+            print(
+                f"note: theme {theme.get('slug')!r} is stylesheet-only "
+                "(variable/media-driven CSS can't be inlined); rendering as standalone stylesheet",
+                file=sys.stderr,
+            )
         body = render_markdown(markdown_text, flavor="semantic")
         return stylesheet_document(title, body, theme, code_theme, mermaid_theme)
+    # MDNice theme: inline by default; "stylesheet" emits the #nice CSS as a <style> block.
     body = render_markdown(markdown_text, flavor="mdnice")
+    if mode == "stylesheet":
+        return mdnice_stylesheet_document(title, body, theme, code_theme, mermaid_theme)
     return article_document(title, body, theme, code_theme, mermaid_theme)
 
 
@@ -1620,6 +1774,7 @@ def build_preview_page(
     themes: list[dict[str, Any]],
     code_theme: str | None = None,
     mermaid_theme: str | None = None,
+    mode: str = "auto",
 ) -> str:
     buttons: list[str] = []
     panels: list[str] = []
@@ -1638,7 +1793,7 @@ def build_preview_page(
             "</button>"
         )
         srcdoc = html.escape(
-            build_theme_document(title, markdown_text, theme, code_theme, mermaid_theme), quote=True
+            build_theme_document(title, markdown_text, theme, code_theme, mermaid_theme, mode), quote=True
         )
         panels.append(
             f'<section class="{panel_class}" id="panel-{index}" role="tabpanel" '
@@ -1784,19 +1939,18 @@ def ensure_theme_styles(args: argparse.Namespace, themes: list[dict[str, Any]], 
 
     if args.cache_styles:
         catalog = load_catalog(catalog_path)
+        catalog_dir = catalog_dir_for(catalog_path)
         by_id = {theme.get("themeId"): theme for theme in catalog.get("themes", []) if isinstance(theme, dict)}
         for theme in missing:
             original = by_id.get(theme.get("themeId"))
             if original is not None:
-                original.update(
-                    {
-                        "styleCss": theme.get("styleCss"),
-                        "styleDataVersion": theme.get("styleDataVersion"),
-                        "styleFetchedAt": theme.get("styleFetchedAt"),
-                    }
-                )
+                # Persist the fetched CSS as a per-theme file; keep the catalog slim.
+                original["styleCss"] = theme.get("styleCss")
+                original["styleDataVersion"] = theme.get("styleDataVersion")
+                original["styleFetchedAt"] = theme.get("styleFetchedAt")
                 original.pop("styleError", None)
-        catalog["styleCount"] = sum(1 for theme in catalog.get("themes", []) if theme.get("styleCss"))
+                externalize_theme_css(catalog_dir, original)
+        catalog["styleCount"] = sum(1 for theme in catalog.get("themes", []) if theme_has_style(theme))
         catalog["fetchedAt"] = utc_now()
         write_catalog(catalog_path, catalog)
 
@@ -1805,17 +1959,23 @@ def render_command(args: argparse.Namespace) -> None:
     catalog = load_catalog(args.catalog)
     refs = split_theme_refs(args.themes)
     themes = resolve_themes(catalog, refs)
+    # Load each MDNice theme's CSS from its per-theme file into memory so the rest
+    # of the pipeline can stay unchanged; then check for any still-missing CSS.
+    catalog_dir = catalog_dir_for(args.catalog)
+    for theme in themes:
+        hydrate_theme_css(theme, catalog_dir)
     ensure_theme_styles(args, themes, args.catalog)
 
     markdown_text = args.markdown.read_text(encoding="utf-8")
     title = args.title or derive_title(markdown_text, args.markdown)
     code_theme = getattr(args, "code_theme", None)
     mermaid_theme = getattr(args, "mermaid_theme", None)
+    mode = getattr(args, "mode", "auto")
     if len(themes) == 1 and not args.preview_tabs:
-        output_html = build_theme_document(title, markdown_text, themes[0], code_theme, mermaid_theme)
+        output_html = build_theme_document(title, markdown_text, themes[0], code_theme, mermaid_theme, mode)
         output_label = "publish HTML"
     else:
-        output_html = build_preview_page(title, markdown_text, themes, code_theme, mermaid_theme)
+        output_html = build_preview_page(title, markdown_text, themes, code_theme, mermaid_theme, mode)
         output_label = "tabbed preview"
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(output_html, encoding="utf-8")
@@ -1852,6 +2012,13 @@ def build_parser() -> argparse.ArgumentParser:
     list_cmd.add_argument("--json", action="store_true")
     list_cmd.set_defaults(func=list_themes)
 
+    split = subparsers.add_parser(
+        "split-catalog",
+        help="migrate an inline-styleCss catalog to one CSS file per theme (slim JSON)",
+    )
+    split.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
+    split.set_defaults(func=split_catalog)
+
     render = subparsers.add_parser("render", help="render Markdown to themed HTML")
     render.add_argument("markdown", type=Path)
     render.add_argument("--themes", nargs="+", required=True, help="1-5 theme IDs or names, comma-separated or repeated")
@@ -1867,6 +2034,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--mermaid-theme",
         choices=list(MERMAID_THEMES),
         help="override the mermaid diagram theme (default: paired to the layout theme)",
+    )
+    render.add_argument(
+        "--mode",
+        choices=["auto", "inline", "stylesheet"],
+        default="auto",
+        help="output mode: auto (MDNice->inline, hub->stylesheet); inline (CSS on style attrs, WeChat/Zhihu paste); stylesheet (theme CSS in a <style> block, web/blog)",
     )
     render.add_argument("--preview-tabs", action="store_true", help="force a tabbed preview even when one theme is selected")
     render.add_argument("--refresh-missing-styles", action="store_true")

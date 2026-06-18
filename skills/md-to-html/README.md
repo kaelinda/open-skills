@@ -6,7 +6,8 @@ Render a Markdown article as standalone HTML. Two theme engines are supported: *
 
 - `SKILL.md`: Codex skill instructions.
 - `scripts/md_to_html.py`: CLI for listing themes, refreshing theme data, and rendering previews.
-- `references/mdnice-themes.json`: cached MDNice (inline-engine) theme metadata and CSS.
+- `references/mdnice-themes.json`: slim MDNice (inline-engine) catalog — metadata + per-theme `cssFile` pointer.
+- `references/mdnice-themes/`: one CSS file per MDNice theme (split out of the catalog so the JSON stays ~20KB).
 - `references/theme-hub-themes.json`: stylesheet-engine theme catalog (slug, wrapper class, appearance, paired code/mermaid theme, license, source).
 - `references/theme-hub/`: vendored open-source CSS theme files (`content-platform/`, `minimal/`) plus `NOTICE.md` provenance/licensing.
 - `references/mdnice-api.md`: MDNice endpoint notes and credential handling.
@@ -31,6 +32,11 @@ python3 skills/md-to-html/scripts/md_to_html.py render article.md \
 # standalone stylesheet theme (blog / web page), selected by slug
 python3 skills/md-to-html/scripts/md_to_html.py render article.md \
   --themes github-light \
+  --output article.html
+
+# any MDNice theme as a standalone <style> document instead of inline styles
+python3 skills/md-to-html/scripts/md_to_html.py render article.md \
+  --themes 极客黑 --mode stylesheet \
   --output article.html
 ```
 

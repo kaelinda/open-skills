@@ -45,7 +45,18 @@ Theme CSS comes from:
 PUT https://api.mdnice.com/articles/styles
 ```
 
-The style endpoint requires `MDNICE_TOKEN` and `MDNICE_OUT_ID`. The cached result is stored in `references/mdnice-themes.json`; the script stores theme metadata plus the returned CSS string as `styleCss`.
+The style endpoint requires `MDNICE_TOKEN` and `MDNICE_OUT_ID`.
+
+CSS is **not** inlined into the catalog JSON. Each theme's CSS is stored as one file under `references/mdnice-themes/` (e.g. `13-极客黑.css`), and `mdnice-themes.json` keeps only metadata plus a `cssFile` pointer (~450 bytes/theme, ~20KB total). This is because `styleCss` was ~98% of the old monolithic catalog (>1.2MB); externalizing it keeps the catalog small, makes per-theme diffs clean, and mirrors the `theme-hub` layout. At render time `hydrate_theme_css` reads the `cssFile` back into memory (an inline `styleCss` still wins for backward compatibility). `split-catalog` migrates an older inline catalog; `fetch-themes --include-styles` and `--cache-styles` write per-theme files going forward via `externalize_theme_css`.
+
+### MDNice output modes
+
+`--mode` selects how an MDNice theme is emitted (`build_theme_document`):
+
+- `inline` (default): `inline_theme_article` flattens the `#nice`-scoped CSS onto each element's `style` attribute (survives WeChat/Zhihu paste).
+- `stylesheet`: `mdnice_stylesheet_document` keeps the same `#nice` DOM but emits the CSS verbatim in a `<style>` block (smaller, cleaner HTML for the web). Mermaid is left intact in both cases — the inline path extracts/splices it around the inliner, and the stylesheet path never runs the inliner.
+
+Hub (`stylesheet`-engine) themes are stylesheet-only; `--mode inline` on them falls back to stylesheet with a note, because their `:root` variables and `@media` rules cannot be represented as inline element styles.
 
 ## Why Plain Markdown HTML Is Not Enough
 
