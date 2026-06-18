@@ -1,8 +1,8 @@
 interface:
   display_name: "MD to HTML"
-  short_description: "Render Markdown with MDNice theme previews"
+  short_description: "Render Markdown with MDNice or standalone CSS themes"
   brand_color: "#2563EB"
-  default_prompt: "Use $md-to-html to render this Markdown article as a tabbed HTML preview with one to five MDNice themes."
+  default_prompt: "Use $md-to-html to render this Markdown article as clean publishable HTML — pick an MDNice theme for WeChat/Zhihu paste or a stylesheet theme (github-light, sakura, latex, heti, …) for a blog, or pass several themes for a tabbed comparison preview."
 
 policy:
   allow_implicit_invocation: true

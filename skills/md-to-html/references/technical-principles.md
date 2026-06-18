@@ -1,6 +1,11 @@
 # Technical Principles
 
-`md-to-html` converts Markdown into standalone HTML that approximates MDNice's editor output. The key idea is not just "Markdown to HTML plus CSS"; it also emits MDNice-like DOM hooks so MDNice theme CSS can attach to the expected elements.
+`md-to-html` converts Markdown into standalone HTML. It has **two rendering engines**, chosen automatically from the selected theme:
+
+- **`inline` (MDNice)**: approximates MDNice's editor output. It emits MDNice-like DOM hooks and converts cached MDNice theme CSS into inline `style` attributes on an `article#nice` DOM, so the result survives a WeChat/Zhihu paste.
+- **`stylesheet` (theme hub)**: renders plain semantic HTML and embeds a vendored open-source CSS theme verbatim in a `<style>` block. This is for blogs / standalone web pages / Typora-style publishing, where the cascade, CSS variables, `@media`, and wrapper classes are needed and inlining would destroy them.
+
+Both engines share one Markdown parser (`render_markdown(text, flavor=...)`), one Pygments-based code highlighter, and one mermaid pipeline. `build_theme_document` dispatches a theme to the right engine and renders the matching Markdown flavor (`mdnice` wrappers vs `semantic`).
 
 ## Pipeline
 
@@ -124,14 +129,35 @@ The inliner supports the selector shapes used by the cached MDNice themes:
 
 CSS constructs that cannot be represented as inline element styles, or selectors outside the supported MDNice subset, are skipped rather than emitted as a theme stylesheet. The output still keeps a small compatibility `<style>` block for page reset, responsive media behavior, tables, images, and code-highlight fallback colors.
 
+## Stylesheet Engine (Theme Hub)
+
+`stylesheet`-engine themes are vendored open-source CSS files under `references/theme-hub/`, catalogued in `references/theme-hub-themes.json` (`slug`, `category`, `file`, `wrapperClass`, `appearance`, `codeTheme`, `mermaidTheme`, `license`, `source`). They are the inverse of the inline engine: instead of flattening CSS onto elements, `stylesheet_document` emits the theme CSS **verbatim** in a `<style>` block over plain semantic HTML. This is required because these themes depend on stylesheet-only behaviour — the cascade, `:root` CSS variables, `@media (prefers-color-scheme: dark)`, `@font-face`, and wrapper-class scoping — none of which can be inlined.
+
+DOM differs from the inline engine because `render_markdown(text, flavor="semantic")` is used:
+
+- headings are bare `<h2>…</h2>` (no `.prefix/.content/.suffix` spans)
+- list items are bare `<li>…</li>` (no `<section>` wrapper)
+- code blocks are `<pre><code class="hljs language-x">…</code></pre>` with **literal** newlines and spaces (no `<br>`/`&nbsp;`), because stylesheet themes render code under `white-space: pre`
+- tables are plain `<table>` inside a style-only `overflow-x` scroll box
+
+Content is placed in the theme's required wrapper: `wrapperClass` empty → directly in `<body>` (classless themes like sakura/water/simple/minimal); `markdown-body` → `<article class="markdown-body">` (GitHub, Smartisan); `heti`/`typo` → those classes. The document layers three `<style>` blocks: a minimal reset (so the theme wins), the theme CSS, then the paired code-highlight CSS.
+
 ## Code Highlighting
 
 Fenced code blocks are tokenized with Pygments, and each token is wrapped in a
 `<span class="hljs-*">` (Pygments token types are mapped onto highlight.js class
-names via `HLJS_CLASS_RULES`). Newlines become `<br>` and spaces `&nbsp;` so the
-layout themes' `display:-webkit-box` on `<code>` cannot collapse the lines. If
-Pygments is unavailable, code falls back to escaped plain text with the same
-line/space handling.
+names via `HLJS_CLASS_RULES`). In the `inline` (MDNice) engine, newlines become
+`<br>` and spaces `&nbsp;` so the layout themes' `display:-webkit-box` on `<code>`
+cannot collapse the lines. In the `stylesheet` engine, newlines and spaces are kept
+literal (`code_escape(..., semantic=True)`) and the block renders under
+`white-space: pre`. If Pygments is unavailable, code falls back to escaped plain
+text with the same line/space handling.
+
+For the `stylesheet` engine, `build_code_theme_css_semantic` emits the paired code
+theme scoped to the theme's wrapper (`.markdown-body pre …` or `body pre …`),
+appended after the theme CSS so it wins the cascade and owns the code block
+(background + base text + `.hljs-*` token colours). Light themes pair with a light
+code theme (`github`/`atom-one-light`), dark themes with `atom-one-dark`.
 
 The cached layout themes style only inline `code`; the code BLOCK (background and
 `.hljs-*` token colours) is a separate dimension — MDNice composes a highlight.js

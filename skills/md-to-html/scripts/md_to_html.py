@@ -25,6 +25,8 @@ API_BASE = "https://api.mdnice.com"
 THEMES_ENDPOINT = f"{API_BASE}/themes"
 STYLES_ENDPOINT = f"{API_BASE}/articles/styles"
 DEFAULT_CATALOG = Path(__file__).resolve().parents[1] / "references" / "mdnice-themes.json"
+HUB_CATALOG = Path(__file__).resolve().parents[1] / "references" / "theme-hub-themes.json"
+HUB_DIR = Path(__file__).resolve().parents[1] / "references" / "theme-hub"
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
@@ -166,6 +168,58 @@ def write_catalog(path: Path, catalog: dict[str, Any]) -> None:
     path.write_text(json.dumps(catalog, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def load_hub_themes(path: Path = HUB_CATALOG) -> list[dict[str, Any]]:
+    """Stylesheet-engine themes vendored from open-source CSS theme projects.
+
+    Each entry references a CSS file under references/theme-hub/; the CSS is read
+    lazily at render time so the catalog JSON stays small and the source files
+    remain human-readable / license-traceable. Missing catalog file is non-fatal
+    (the skill still works with MDNice themes only)."""
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    themes = data.get("themes") if isinstance(data, dict) else None
+    if not isinstance(themes, list):
+        return []
+    for theme in themes:
+        if isinstance(theme, dict):
+            theme.setdefault("engine", "stylesheet")
+    return [theme for theme in themes if isinstance(theme, dict)]
+
+
+def hub_theme_css(theme: dict[str, Any]) -> str:
+    rel = str(theme.get("file") or "").strip()
+    if not rel:
+        raise MdniceError(f"stylesheet theme {theme.get('slug')!r} has no file")
+    css_path = HUB_DIR / rel
+    if not css_path.exists():
+        raise MdniceError(f"theme CSS not found: {css_path}")
+    return css_path.read_text(encoding="utf-8")
+
+
+def all_themes(mdnice_catalog: dict[str, Any]) -> list[dict[str, Any]]:
+    """Combined selectable themes: MDNice inline themes + stylesheet hub themes.
+
+    The MDNice catalog is not mutated on disk; the engine tag is added in-memory."""
+    combined: list[dict[str, Any]] = []
+    for theme in mdnice_catalog.get("themes") or []:
+        if isinstance(theme, dict):
+            theme.setdefault("engine", "inline")
+            combined.append(theme)
+    combined.extend(load_hub_themes())
+    return combined
+
+
+def theme_identity(theme: dict[str, Any]) -> Any:
+    """Dedup/identity key: MDNice themes use themeId, hub themes use slug."""
+    if isinstance(theme.get("themeId"), int):
+        return ("id", theme["themeId"])
+    return ("slug", str(theme.get("slug") or theme.get("name") or ""))
+
+
 def build_catalog(args: argparse.Namespace) -> None:
     themes = fetch_theme_list(args.page_size, args.strict_tls)
     existing_by_id: dict[int, dict[str, Any]] = {}
@@ -229,7 +283,16 @@ def build_catalog(args: argparse.Namespace) -> None:
 
 def theme_label(theme: dict[str, Any]) -> str:
     name = clean_text(str(theme.get("name") or "Unnamed"))
-    bits = [str(theme.get("themeId")), name]
+    if str(theme.get("engine")) == "stylesheet":
+        bits = [str(theme.get("slug")), name, "stylesheet"]
+        category = theme.get("category")
+        if category:
+            bits.append(str(category))
+        appearance = theme.get("appearance")
+        if appearance:
+            bits.append(str(appearance))
+        return " | ".join(bits)
+    bits = [str(theme.get("themeId")), name, "mdnice"]
     author = theme.get("applicantUsername")
     if author:
         bits.append(f"by {author}")
@@ -242,20 +305,20 @@ def theme_label(theme: dict[str, Any]) -> str:
 
 def list_themes(args: argparse.Namespace) -> None:
     catalog = load_catalog(args.catalog)
-    themes = catalog.get("themes") or []
+    themes = all_themes(catalog)
     query = (args.query or "").casefold()
     if args.json:
         filtered = [
             theme
             for theme in themes
             if (not query or query in json.dumps(theme, ensure_ascii=False).casefold())
-            and (not args.with_style_only or bool(theme.get("styleCss")))
+            and (not args.with_style_only or bool(theme.get("styleCss")) or str(theme.get("engine")) == "stylesheet")
         ]
         print(json.dumps(filtered, ensure_ascii=False, indent=2))
         return
 
     for theme in themes:
-        if args.with_style_only and not theme.get("styleCss"):
+        if args.with_style_only and not theme.get("styleCss") and str(theme.get("engine")) != "stylesheet":
             continue
         haystack = json.dumps(theme, ensure_ascii=False).casefold()
         if query and query not in haystack:
@@ -274,13 +337,22 @@ def clean_text(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
+def theme_ref_label(theme: dict[str, Any]) -> str:
+    if isinstance(theme.get("themeId"), int):
+        return f"{theme.get('themeId')}:{theme.get('name')}"
+    return f"{theme.get('slug')}:{theme.get('name')}"
+
+
 def resolve_themes(catalog: dict[str, Any], refs: list[str]) -> list[dict[str, Any]]:
-    themes = catalog.get("themes") or []
-    if not isinstance(themes, list):
+    # Search both engines: MDNice inline themes (themeId) and stylesheet hub
+    # themes (slug). A digit ref only matches an MDNice themeId; everything else
+    # matches a name (exact, then substring) or an exact hub slug.
+    themes = all_themes(catalog)
+    if not themes:
         raise MdniceError("catalog has no themes list")
 
     selected: list[dict[str, Any]] = []
-    used: set[int] = set()
+    used: set[Any] = set()
     for ref in refs:
         match: dict[str, Any] | None = None
         if ref.isdigit():
@@ -288,20 +360,21 @@ def resolve_themes(catalog: dict[str, Any], refs: list[str]) -> list[dict[str, A
             match = next((theme for theme in themes if theme.get("themeId") == wanted), None)
         else:
             folded = clean_text(ref).casefold()
+            slug_hit = [theme for theme in themes if str(theme.get("slug") or "").casefold() == folded]
             exact = [theme for theme in themes if clean_text(str(theme.get("name") or "")).casefold() == folded]
             partial = [theme for theme in themes if folded in clean_text(str(theme.get("name") or "")).casefold()]
-            matches = exact or partial
+            matches = slug_hit or exact or partial
             if len(matches) == 1:
                 match = matches[0]
             elif len(matches) > 1:
-                names = ", ".join(f"{theme.get('themeId')}:{theme.get('name')}" for theme in matches[:8])
+                names = ", ".join(theme_ref_label(theme) for theme in matches[:8])
                 raise MdniceError(f"theme selector {ref!r} is ambiguous: {names}")
         if not match:
             raise MdniceError(f"theme not found: {ref}")
-        theme_id = match.get("themeId")
-        if isinstance(theme_id, int) and theme_id not in used:
+        identity = theme_identity(match)
+        if identity not in used:
             selected.append(match)
-            used.add(theme_id)
+            used.add(identity)
 
     if not 1 <= len(selected) <= 5:
         raise MdniceError(f"select 1-5 unique themes, got {len(selected)}")
@@ -321,14 +394,17 @@ def strip_frontmatter(markdown_text: str) -> str:
     return markdown_text
 
 
-def render_markdown(markdown_text: str) -> str:
-    # The MDNice themes rely on platform-specific wrapper nodes. Use the local
-    # renderer consistently so output keeps those CSS hooks even when generic
-    # Markdown libraries are installed.
-    return render_markdown_fallback(strip_frontmatter(markdown_text))
+def render_markdown(markdown_text: str, flavor: str = "mdnice") -> str:
+    # flavor="mdnice": emit MDNice wrapper nodes (.prefix/.content/.suffix spans,
+    # li>section, pre.custom code.hljs) so cached MDNice theme CSS can attach and
+    # be inlined. flavor="semantic": emit plain semantic HTML (<h2>, <li>, <pre>
+    # <code>) so standalone stylesheet themes (github/sakura/...) style it the way
+    # their authors intended.
+    return render_markdown_fallback(strip_frontmatter(markdown_text), flavor)
 
 
-def render_markdown_fallback(markdown_text: str) -> str:
+def render_markdown_fallback(markdown_text: str, flavor: str = "mdnice") -> str:
+    semantic = flavor == "semantic"
     lines = markdown_text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     blocks: list[str] = []
     paragraph: list[str] = []
@@ -367,18 +443,24 @@ def render_markdown_fallback(markdown_text: str) -> str:
             if language.lower() == "mermaid":
                 blocks.append(render_mermaid_block(chr(10).join(code_lines)))
                 continue
-            # code carries "hljs code__pre" so both bare ".hljs" and compound
-            # ".hljs.code__pre" highlightTheme variants match; language-* kept for info.
             lang_cls = f" language-{html.escape(language)}" if language else ""
-            highlighted = highlight_code(chr(10).join(code_lines), language)
-            blocks.append(f'<pre class="custom"><code class="hljs code__pre{lang_cls}">{highlighted}</code></pre>')
+            highlighted = highlight_code(chr(10).join(code_lines), language, semantic=semantic)
+            if semantic:
+                # Plain <pre><code>: stylesheet themes style real code blocks and
+                # the paired code theme colours the .hljs-* token spans; newlines
+                # stay literal under white-space:pre.
+                blocks.append(f'<pre><code class="hljs{lang_cls}">{highlighted}</code></pre>')
+            else:
+                # code carries "hljs code__pre" so both bare ".hljs" and compound
+                # ".hljs.code__pre" highlightTheme variants match; language-* kept for info.
+                blocks.append(f'<pre class="custom"><code class="hljs code__pre{lang_cls}">{highlighted}</code></pre>')
             continue
 
         heading = re.match(r"^(#{1,6})\s+(.+)$", stripped)
         if heading:
             flush_paragraph()
             level = len(heading.group(1))
-            blocks.append(render_heading(level, heading.group(2).strip()))
+            blocks.append(render_heading(level, heading.group(2).strip(), semantic=semantic))
             index += 1
             continue
 
@@ -394,7 +476,7 @@ def render_markdown_fallback(markdown_text: str) -> str:
             while index < len(lines) and lines[index].strip().startswith(">"):
                 quote_lines.append(lines[index].strip().lstrip(">").strip())
                 index += 1
-            blocks.append(f"<blockquote>{render_markdown_fallback(chr(10).join(quote_lines))}</blockquote>")
+            blocks.append(f"<blockquote>{render_markdown_fallback(chr(10).join(quote_lines), flavor)}</blockquote>")
             continue
 
         if is_table_start(lines, index):
@@ -404,8 +486,12 @@ def render_markdown_fallback(markdown_text: str) -> str:
             while index < len(lines) and "|" in lines[index] and lines[index].strip():
                 table_lines.append(lines[index])
                 index += 1
-            blocks.append(render_table(table_lines))
+            blocks.append(render_table(table_lines, semantic=semantic))
             continue
+
+        # Semantic flavor uses bare <li>Item</li>; MDNice flavor wraps in <section>
+        # so themes targeting "li section" attach.
+        item_wrap = (lambda inner: inner) if semantic else (lambda inner: f"<section>{inner}</section>")
 
         ul_match = re.match(r"^\s*[-*+]\s+(.+)$", line)
         if ul_match:
@@ -415,7 +501,7 @@ def render_markdown_fallback(markdown_text: str) -> str:
                 item_match = re.match(r"^\s*[-*+]\s+(.+)$", lines[index])
                 if not item_match:
                     break
-                items.append(f"<li><section>{inline_markup(item_match.group(1))}</section></li>")
+                items.append(f"<li>{item_wrap(inline_markup(item_match.group(1)))}</li>")
                 index += 1
             blocks.append(f"<ul>{''.join(items)}</ul>")
             continue
@@ -428,7 +514,7 @@ def render_markdown_fallback(markdown_text: str) -> str:
                 item_match = re.match(r"^\s*\d+\.\s+(.+)$", lines[index])
                 if not item_match:
                     break
-                items.append(f"<li><section>{inline_markup(item_match.group(1))}</section></li>")
+                items.append(f"<li>{item_wrap(inline_markup(item_match.group(1)))}</li>")
                 index += 1
             blocks.append(f"<ol>{''.join(items)}</ol>")
             continue
@@ -440,8 +526,10 @@ def render_markdown_fallback(markdown_text: str) -> str:
     return "\n".join(blocks)
 
 
-def render_heading(level: int, text: str) -> str:
+def render_heading(level: int, text: str, semantic: bool = False) -> str:
     content = inline_markup(text)
+    if semantic:
+        return f"<h{level}>{content}</h{level}>"
     return (
         f"<h{level}>"
         '<span class="prefix"></span>'
@@ -494,18 +582,22 @@ def hljs_class_for(ttype: Any) -> str | None:
     return None
 
 
-def code_escape(text: str) -> str:
-    # Align with MDNice code blocks: newline -> <br>, space -> &nbsp;. The themes
-    # set display:-webkit-box on <code>, where a bare "\n" would not wrap, so the
+def code_escape(text: str, semantic: bool = False) -> str:
+    # MDNice mode: newline -> <br>, space -> &nbsp;. MDNice themes set
+    # display:-webkit-box on <code>, where a bare "\n" would not wrap, so the
     # markup must carry explicit line breaks (and nbsp to preserve indentation).
+    # Semantic mode: keep literal newlines/spaces; stylesheet themes render code
+    # under white-space:pre, so real text copies cleanly and selects correctly.
     text = html.escape(text)
+    if semantic:
+        return text
     text = text.replace("\t", "&nbsp;&nbsp;&nbsp;&nbsp;")
     text = text.replace(" ", "&nbsp;")
     text = text.replace("\n", "<br>")
     return text
 
 
-def highlight_code(code: str, language: str) -> str:
+def highlight_code(code: str, language: str, semantic: bool = False) -> str:
     code = code.rstrip("\n")
     try:
         from pygments.lexers import TextLexer, get_lexer_by_name  # type: ignore
@@ -519,14 +611,17 @@ def highlight_code(code: str, language: str) -> str:
             if not value:
                 continue
             cls = hljs_class_for(ttype)
-            esc = code_escape(value)
+            esc = code_escape(value, semantic=semantic)
             parts.append(f'<span class="{cls}">{esc}</span>' if cls else esc)
         result = "".join(parts)
-        if result.endswith("<br>"):  # get_tokens appends a trailing newline
+        if semantic:
+            if result.endswith("\n"):  # get_tokens appends a trailing newline
+                result = result[:-1]
+        elif result.endswith("<br>"):
             result = result[:-4]
         return result
     except Exception:
-        return code_escape(code)
+        return code_escape(code, semantic=semantic)
 
 
 def render_mermaid_block(source: str) -> str:
@@ -602,6 +697,36 @@ def build_code_theme_css(key: str) -> str:
     return "\n".join(lines)
 
 
+def build_code_theme_css_semantic(key: str, prefix: str) -> str:
+    """Code-block CSS for stylesheet (standalone) themes, scoped under `prefix`
+    (the theme's wrapper class selector, or `body` for classless themes).
+
+    Stylesheet themes either don't colour syntax tokens at all (classless) or use
+    a non-hljs class set (GitHub `.pl-*`), so the paired code theme owns the block:
+    background + base text + `.hljs-*` token colours. It is appended after the
+    layout CSS at equal-or-higher specificity, so it wins the cascade and gives
+    every theme a coherent, readable, highlighted code block."""
+    theme = CODE_THEMES.get(key) or CODE_THEMES[DEFAULT_CODE_THEME]
+    p = prefix
+    lines = [
+        f"{p} pre {{ background-color: {theme['bg']}; border-radius: 6px; padding: 14px 16px; overflow-x: auto; }}",
+        f"{p} pre code.hljs {{ display: block; background: transparent; color: {theme['base']}; "
+        "white-space: pre; padding: 0; border: 0; font-size: 13px; line-height: 1.6; "
+        'font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }',
+    ]
+    for role, classes in HLJS_ROLE_CLASSES.items():
+        color = theme.get(role)
+        if not color:
+            continue
+        selector = ", ".join(f"{p} pre code.hljs .{cls}" for cls in classes)
+        extra = " font-style: italic;" if role == "comment" else ""
+        lines.append(f"{selector} {{ color: {color};{extra} }}")
+    lines.append(f"{p} pre code.hljs .hljs-class .hljs-title {{ color: {theme['builtin']}; }}")
+    lines.append(f"{p} pre code.hljs .hljs-emphasis {{ font-style: italic; }}")
+    lines.append(f"{p} pre code.hljs .hljs-strong {{ font-weight: bold; }}")
+    return "\n".join(lines)
+
+
 # Each layout theme -> (code theme, mermaid theme), chosen to match the layout's
 # accent/mood. Unmapped themes fall back to the default pairing.
 THEME_STYLE_MAP: dict[str, tuple[str, str]] = {
@@ -657,6 +782,26 @@ def resolve_theme_styles(
         mermaid_theme = mermaid_override
     if code_key not in CODE_THEMES:
         code_key = DEFAULT_CODE_THEME
+    if mermaid_theme not in MERMAID_THEMES:
+        mermaid_theme = DEFAULT_MERMAID_THEME
+    return code_key, mermaid_theme
+
+
+def resolve_stylesheet_styles(
+    theme: dict[str, Any],
+    code_override: str | None = None,
+    mermaid_override: str | None = None,
+) -> tuple[str, str]:
+    """Code/mermaid pairing for stylesheet themes: catalog metadata first, then a
+    sensible default keyed by the theme's light/dark appearance."""
+    appearance = str(theme.get("appearance") or "light").lower()
+    default_code = "atom-one-dark" if appearance == "dark" else "github"
+    code_key = code_override or str(theme.get("codeTheme") or default_code)
+    mermaid_theme = mermaid_override or str(
+        theme.get("mermaidTheme") or ("dark" if appearance == "dark" else DEFAULT_MERMAID_THEME)
+    )
+    if code_key not in CODE_THEMES:
+        code_key = default_code if default_code in CODE_THEMES else DEFAULT_CODE_THEME
     if mermaid_theme not in MERMAID_THEMES:
         mermaid_theme = DEFAULT_MERMAID_THEME
     return code_key, mermaid_theme
@@ -730,14 +875,19 @@ def split_table_row(line: str) -> list[str]:
     return [cell.strip() for cell in stripped.split("|")]
 
 
-def render_table(lines: list[str]) -> str:
+def render_table(lines: list[str], semantic: bool = False) -> str:
     headers = split_table_row(lines[0])
     body_rows = [split_table_row(line) for line in lines[2:]]
     head = "".join(f"<th>{inline_markup(cell)}</th>" for cell in headers)
     body = "".join(
         "<tr>" + "".join(f"<td>{inline_markup(cell)}</td>" for cell in row) + "</tr>" for row in body_rows
     )
-    return f'<section class="table-container"><table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></section>'
+    table = f"<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>"
+    if semantic:
+        # Stylesheet themes style <table>/<th>/<td> directly; wrap only in a
+        # style-only scroll box (no class) so wide tables don't break layout.
+        return f'<div style="overflow-x:auto;">{table}</div>'
+    return f'<section class="table-container">{table}</section>'
 
 
 @dataclass
@@ -1389,9 +1539,84 @@ body {{ overflow-wrap: break-word; }}
 </html>"""
 
 
-def build_preview_page(
+def stylesheet_document(
     title: str,
     body_html: str,
+    theme: dict[str, Any],
+    code_theme: str | None = None,
+    mermaid_theme: str | None = None,
+) -> str:
+    """Standalone HTML for a `stylesheet`-engine theme: emit the vendored theme CSS
+    verbatim in a <style> block over semantic HTML (the inverse of the MDNice inline
+    path). The content is placed in the theme's required wrapper class (e.g.
+    `.markdown-body` for GitHub, `.heti`/`.typo` for those themes, or directly in
+    <body> for classless themes), and a paired code-highlight theme is appended last."""
+    theme_css = hub_theme_css(theme)
+    wrapper_class = str(theme.get("wrapperClass") or "").strip()
+    prefix = f".{wrapper_class}" if wrapper_class else "body"
+    code_key, mmd_theme = resolve_stylesheet_styles(theme, code_theme, mermaid_theme)
+    code_css = build_code_theme_css_semantic(code_key, prefix)
+
+    has_mermaid = 'data-mermaid="1"' in body_html
+    mermaid_runtime_html = mermaid_runtime(mmd_theme) if has_mermaid else ""
+    appearance = str(theme.get("appearance") or "light").lower()
+    page_bg = "#0d1117" if appearance == "dark" else "#ffffff"
+
+    if wrapper_class:
+        article = f'<article class="{html.escape(wrapper_class, quote=True)}">{body_html}</article>'
+    else:
+        article = body_html
+
+    safe_title = html.escape(title)
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{safe_title}</title>
+{mermaid_runtime_html}
+<style>
+/* base reset (kept minimal so the theme CSS below wins the cascade) */
+html, body {{ margin: 0; padding: 0; }}
+body {{ background: {page_bg}; overflow-wrap: break-word; }}
+img {{ max-width: 100%; height: auto; }}
+.mermaid svg {{ max-width: 100%; height: auto; }}
+</style>
+<style>
+/* ===== theme: {html.escape(str(theme.get('name') or theme.get('slug') or ''))} ===== */
+{theme_css}
+</style>
+<style>
+/* ===== paired code-highlight theme: {html.escape(code_key)} ===== */
+{code_css}
+</style>
+</head>
+<body>
+{article}
+</body>
+</html>"""
+
+
+def build_theme_document(
+    title: str,
+    markdown_text: str,
+    theme: dict[str, Any],
+    code_theme: str | None = None,
+    mermaid_theme: str | None = None,
+) -> str:
+    """Dispatch a single theme to the right engine, rendering the matching Markdown
+    flavor: stylesheet -> semantic HTML + <style>; MDNice (inline) -> wrapper DOM
+    with inline styles."""
+    if str(theme.get("engine")) == "stylesheet":
+        body = render_markdown(markdown_text, flavor="semantic")
+        return stylesheet_document(title, body, theme, code_theme, mermaid_theme)
+    body = render_markdown(markdown_text, flavor="mdnice")
+    return article_document(title, body, theme, code_theme, mermaid_theme)
+
+
+def build_preview_page(
+    title: str,
+    markdown_text: str,
     themes: list[dict[str, Any]],
     code_theme: str | None = None,
     mermaid_theme: str | None = None,
@@ -1400,7 +1625,7 @@ def build_preview_page(
     panels: list[str] = []
     for index, theme in enumerate(themes):
         theme_name = clean_text(str(theme.get("name") or f"Theme {theme.get('themeId')}"))
-        theme_id = str(theme.get("themeId"))
+        theme_id = str(theme.get("themeId") or theme.get("slug") or "")
         active = index == 0
         button_class = "tab-button is-active" if active else "tab-button"
         panel_class = "preview-panel is-active" if active else "preview-panel"
@@ -1413,7 +1638,7 @@ def build_preview_page(
             "</button>"
         )
         srcdoc = html.escape(
-            article_document(title, body_html, theme, code_theme, mermaid_theme), quote=True
+            build_theme_document(title, markdown_text, theme, code_theme, mermaid_theme), quote=True
         )
         panels.append(
             f'<section class="{panel_class}" id="panel-{index}" role="tabpanel" '
@@ -1531,7 +1756,13 @@ for (const tab of tabs) {{
 
 
 def ensure_theme_styles(args: argparse.Namespace, themes: list[dict[str, Any]], catalog_path: Path) -> None:
-    missing = [theme for theme in themes if not theme.get("styleCss")]
+    # Stylesheet (hub) themes carry CSS in vendored files, not styleCss; only
+    # MDNice inline themes need the styles endpoint.
+    missing = [
+        theme
+        for theme in themes
+        if str(theme.get("engine")) != "stylesheet" and not theme.get("styleCss")
+    ]
     if not missing:
         return
 
@@ -1578,14 +1809,13 @@ def render_command(args: argparse.Namespace) -> None:
 
     markdown_text = args.markdown.read_text(encoding="utf-8")
     title = args.title or derive_title(markdown_text, args.markdown)
-    body_html = render_markdown(markdown_text)
     code_theme = getattr(args, "code_theme", None)
     mermaid_theme = getattr(args, "mermaid_theme", None)
     if len(themes) == 1 and not args.preview_tabs:
-        output_html = article_document(title, body_html, themes[0], code_theme, mermaid_theme)
+        output_html = build_theme_document(title, markdown_text, themes[0], code_theme, mermaid_theme)
         output_label = "publish HTML"
     else:
-        output_html = build_preview_page(title, body_html, themes, code_theme, mermaid_theme)
+        output_html = build_preview_page(title, markdown_text, themes, code_theme, mermaid_theme)
         output_label = "tabbed preview"
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(output_html, encoding="utf-8")

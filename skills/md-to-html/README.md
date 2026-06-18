@@ -1,14 +1,16 @@
 # md-to-html
 
-Render a Markdown article as standalone HTML with MDNice themes. A single selected theme produces a clean publishable HTML document. Selecting multiple themes produces a tabbed comparison preview.
+Render a Markdown article as standalone HTML. Two theme engines are supported: **MDNice** themes (CSS inlined onto an `article#nice` DOM, ideal for WeChat/Zhihu paste) and **standalone stylesheet** themes (GitHub, Sakura, LaTeX, Tufte, Heti, minimal, … embedded as a `<style>` block over semantic HTML, ideal for blogs / web pages). A single selected theme produces a clean publishable HTML document; selecting multiple themes produces a tabbed comparison preview.
 
 ## Files
 
 - `SKILL.md`: Codex skill instructions.
 - `scripts/md_to_html.py`: CLI for listing themes, refreshing theme data, and rendering previews.
-- `references/mdnice-themes.json`: cached MDNice theme metadata and CSS.
+- `references/mdnice-themes.json`: cached MDNice (inline-engine) theme metadata and CSS.
+- `references/theme-hub-themes.json`: stylesheet-engine theme catalog (slug, wrapper class, appearance, paired code/mermaid theme, license, source).
+- `references/theme-hub/`: vendored open-source CSS theme files (`content-platform/`, `minimal/`) plus `NOTICE.md` provenance/licensing.
 - `references/mdnice-api.md`: MDNice endpoint notes and credential handling.
-- `references/technical-principles.md`: rendering architecture and MDNice-like DOM mapping.
+- `references/technical-principles.md`: rendering architecture for both engines and MDNice-like DOM mapping.
 
 ## Quick Start
 
@@ -21,8 +23,14 @@ python3 skills/md-to-html/scripts/md_to_html.py list-themes
 Render a Markdown file with one theme. This produces pure article HTML without tab UI:
 
 ```bash
+# MDNice inline theme (WeChat/Zhihu paste)
 python3 skills/md-to-html/scripts/md_to_html.py render article.md \
   --themes 极客黑 \
+  --output article.html
+
+# standalone stylesheet theme (blog / web page), selected by slug
+python3 skills/md-to-html/scripts/md_to_html.py render article.md \
+  --themes github-light \
   --output article.html
 ```
 
