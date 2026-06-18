@@ -224,8 +224,12 @@ once. It is **on by default for the inline (WeChat/Zhihu paste) output** — tho
 platforms drop inline link URLs, so footnotes preserve them — and **off for
 stylesheet documents**, where links stay clickable. `--footnotes` / `--no-footnotes`
 force it either way. For the inline engine the appended section sits inside
-`article#nice`, so theme text styles apply; the markers carry their own inline
-colour so they survive whether or not a theme styles `.footnote-ref`.
+`article#nice`, so theme text styles apply. Both the in-body `[N]` marker and the
+reference-list number are tinted with `theme_accent_color(theme)` — which reads the
+theme's own `.footnote-ref` colour (falling back to the inline-code colour, then a
+default) — so they match the theme and each other. The reference-list number span
+is intentionally class-less: a class like `footnote-num` would let some themes
+override its colour to a muted grey, breaking the accent match.
 
 ## Output Modes
 

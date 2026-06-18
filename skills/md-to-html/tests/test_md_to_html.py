@@ -158,6 +158,24 @@ class Footnotes(unittest.TestCase):
         body = "<p>no links here</p>"
         self.assertEqual(m.convert_links_to_footnotes(body), body)
 
+    def test_accent_color_prefers_footnote_ref(self):
+        css = "#nice p .footnote-ref { color: rgba(239,112,96,1); } #nice p code { color: #000; }"
+        self.assertEqual(m.theme_accent_color({"styleCss": css}), "rgba(239,112,96,1)")
+        # falls back to the inline-code colour, then the default
+        self.assertEqual(m.theme_accent_color({"styleCss": "#nice p code { color: #abc; }"}), "#abc")
+        self.assertEqual(m.theme_accent_color({}), m.DEFAULT_ACCENT_COLOR)
+
+    def test_footnote_number_color_matches_marker(self):
+        import re
+
+        html = render("极客黑")  # accent (coral), not the hardcoded default
+        marker = re.search(r'<sup class="footnote-ref" style="[^"]*color:\s*([^;"]+)', html)
+        number = re.search(r'<p class="footnote-item"[^>]*>\s*<span style="color:\s*([^;"]+)', html)
+        self.assertIsNotNone(marker)
+        self.assertIsNotNone(number)
+        self.assertEqual(marker.group(1).strip(), number.group(1).strip())
+        self.assertNotEqual(number.group(1).strip(), m.DEFAULT_ACCENT_COLOR)
+
     def test_inline_footnotes_default_on(self):
         html = render("极客黑")  # SAMPLE_MD has [链接](https://e.com)
         self.assertIn('<sup class="footnote-ref"', html)

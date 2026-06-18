@@ -1795,18 +1795,49 @@ body { overflow-wrap: break-word; }
 
 
 FOOTNOTE_LINK_RE = re.compile(r'<a\s+href="([^"]*)">(.*?)</a>', re.S)
+DEFAULT_ACCENT_COLOR = "#1e6bb8"
 
 
 def _strip_tags(fragment: str) -> str:
     return re.sub(r"<[^>]+>", "", fragment)
 
 
-def convert_links_to_footnotes(body_html: str) -> str:
+def theme_accent_color(theme: dict[str, Any]) -> str:
+    """Best-effort accent colour for a theme, used to tint footnote numbers so the
+    bottom reference list matches the in-body markers. Prefer the theme's own
+    `.footnote-ref` colour (exactly what tints the body superscript), then the
+    inline-code colour (`#nice p code`); for stylesheet themes fall back to a link
+    colour, then appearance."""
+    css = str(theme.get("styleCss") or "")
+    if css:
+        for pattern in (r"\.footnote-ref\b[^{]*\{([^}]*)\}", r"#nice\s+p\s+code\b[^{]*\{([^}]*)\}"):
+            block = re.search(pattern, css)
+            if block:
+                color = re.search(r"(?<![-\w])color\s*:\s*([^;]+)", block.group(1))
+                if color:
+                    return color.group(1).strip()
+    if str(theme.get("engine")) == "stylesheet":
+        try:
+            pcss = pack_theme_css(theme)
+        except Exception:
+            pcss = ""
+        block = re.search(r"(?:^|[^.\w-])a\s*(?::link)?\s*\{([^}]*)\}", pcss)
+        if block:
+            color = re.search(r"(?<![-\w])color\s*:\s*([^;]+)", block.group(1))
+            if color:
+                return color.group(1).strip()
+        if str(theme.get("appearance") or "").lower() == "dark":
+            return "#58a6ff"
+    return DEFAULT_ACCENT_COLOR
+
+
+def convert_links_to_footnotes(body_html: str, accent: str = DEFAULT_ACCENT_COLOR) -> str:
     """Turn inline `<a href>` links into footnote references: keep the link text,
     append a superscript [N] marker, and collect the URLs into a reference list
     appended at the end of the article. Mirrors MDNice's footnote mode, which
-    preserves URLs that WeChat/Zhihu strip from inline links. Returns the body
-    unchanged when it has no links."""
+    preserves URLs that WeChat/Zhihu strip from inline links. `accent` tints the
+    [N] numbers so they match the theme. Returns the body unchanged with no links."""
+    accent_css = html.escape(accent, quote=True)
     notes: list[tuple[str, str]] = []  # (label, url) in order of appearance
 
     def repl(match: re.Match[str]) -> str:
@@ -1820,7 +1851,7 @@ def convert_links_to_footnotes(body_html: str) -> str:
         return (
             f"{inner}"
             f'<sup class="footnote-ref" style="font-size: 75%; line-height: 0; '
-            f'vertical-align: super; color: #1e6bb8;">[{index}]</sup>'
+            f'vertical-align: super; color: {accent_css};">[{index}]</sup>'
         )
 
     new_body = FOOTNOTE_LINK_RE.sub(repl, body_html)
@@ -1830,10 +1861,12 @@ def convert_links_to_footnotes(body_html: str) -> str:
     items = []
     for index, (label, url) in enumerate(notes, start=1):
         # label/url are already HTML-escaped by repl().
+        # No class on the number span: a class like `footnote-num` would let some
+        # MDNice themes override its colour (to a muted grey), defeating the accent.
         items.append(
             '<p class="footnote-item" style="margin: 4px 0; font-size: 14px; '
             'line-height: 1.7; word-break: break-all; color: #888;">'
-            f'<span style="color: #1e6bb8;">[{index}]</span> '
+            f'<span style="color: {accent_css};">[{index}]</span> '
             f"{label}: {url}</p>"
         )
     footnotes_section = (
@@ -2023,12 +2056,12 @@ def build_theme_document(
             )
         body = render_markdown(markdown_text, flavor="semantic")
         if use_footnotes:
-            body = convert_links_to_footnotes(body)
+            body = convert_links_to_footnotes(body, theme_accent_color(theme))
         return stylesheet_document(title, body, theme, code_theme, mermaid_theme)
     # MDNice theme: inline by default; "stylesheet" emits the #nice CSS as a <style> block.
     body = render_markdown(markdown_text, flavor="mdnice")
     if use_footnotes:
-        body = convert_links_to_footnotes(body)
+        body = convert_links_to_footnotes(body, theme_accent_color(theme))
     if mode == "stylesheet":
         return mdnice_stylesheet_document(title, body, theme, code_theme, mermaid_theme)
     return article_document(title, body, theme, code_theme, mermaid_theme)
