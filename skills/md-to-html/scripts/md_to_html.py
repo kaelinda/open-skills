@@ -24,9 +24,12 @@ from typing import Any
 API_BASE = "https://api.mdnice.com"
 THEMES_ENDPOINT = f"{API_BASE}/themes"
 STYLES_ENDPOINT = f"{API_BASE}/articles/styles"
-DEFAULT_CATALOG = Path(__file__).resolve().parents[1] / "references" / "mdnice-themes.json"
-HUB_CATALOG = Path(__file__).resolve().parents[1] / "references" / "theme-hub-themes.json"
-HUB_DIR = Path(__file__).resolve().parents[1] / "references" / "theme-hub"
+REFERENCES_DIR = Path(__file__).resolve().parents[1] / "references"
+DEFAULT_CATALOG = REFERENCES_DIR / "mdnice-themes.json"
+# The built-in inline pack; every other "<pack>-themes.json" under references/ is
+# an auto-discovered stylesheet theme pack (theme-hub, mweb-theme, ...).
+BUILTIN_PACK = "mdnice"
+PACK_CATALOG_SUFFIX = "-themes.json"
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
@@ -168,36 +171,216 @@ def write_catalog(path: Path, catalog: dict[str, Any]) -> None:
     path.write_text(json.dumps(catalog, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def load_hub_themes(path: Path = HUB_CATALOG) -> list[dict[str, Any]]:
-    """Stylesheet-engine themes vendored from open-source CSS theme projects.
-
-    Each entry references a CSS file under references/theme-hub/; the CSS is read
-    lazily at render time so the catalog JSON stays small and the source files
-    remain human-readable / license-traceable. Missing catalog file is non-fatal
-    (the skill still works with MDNice themes only)."""
-    if not path.exists():
-        return []
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return []
-    themes = data.get("themes") if isinstance(data, dict) else None
-    if not isinstance(themes, list):
-        return []
-    for theme in themes:
-        if isinstance(theme, dict):
-            theme.setdefault("engine", "stylesheet")
-    return [theme for theme in themes if isinstance(theme, dict)]
+def pack_catalog_path(pack: str) -> Path:
+    return REFERENCES_DIR / f"{pack}{PACK_CATALOG_SUFFIX}"
 
 
-def hub_theme_css(theme: dict[str, Any]) -> str:
+def pack_dir(pack: str) -> Path:
+    return REFERENCES_DIR / pack
+
+
+def discover_packs() -> list[str]:
+    """Names of every auto-discovered stylesheet theme pack: any
+    references/<pack>-themes.json except the built-in inline pack (mdnice).
+    Drop a new `<pack>-themes.json` + `<pack>/` folder and it loads with no code
+    change — that is how theme-hub, mweb-theme, etc. plug in."""
+    names = []
+    for catalog in sorted(REFERENCES_DIR.glob(f"*{PACK_CATALOG_SUFFIX}")):
+        name = catalog.name[: -len(PACK_CATALOG_SUFFIX)]
+        if name and name != BUILTIN_PACK:
+            names.append(name)
+    return names
+
+
+def load_pack_themes(packs: list[str] | None = None) -> list[dict[str, Any]]:
+    """Stylesheet-engine themes from all (or the given) extension packs. Each entry
+    references a CSS file under references/<pack>/, read lazily at render time so
+    the catalog JSON stays small and the source files remain license-traceable.
+    Each theme is tagged with its `pack` so CSS resolves to the right folder."""
+    themes: list[dict[str, Any]] = []
+    for name in (packs if packs is not None else discover_packs()):
+        catalog = pack_catalog_path(name)
+        if not catalog.exists():
+            continue
+        try:
+            data = json.loads(catalog.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        entries = data.get("themes") if isinstance(data, dict) else None
+        if not isinstance(entries, list):
+            continue
+        for theme in entries:
+            if isinstance(theme, dict):
+                theme.setdefault("engine", "stylesheet")
+                theme["pack"] = name
+                themes.append(theme)
+    return themes
+
+
+# Back-compat alias (older callers / docs).
+def load_hub_themes() -> list[dict[str, Any]]:
+    return load_pack_themes()
+
+
+def pack_theme_css(theme: dict[str, Any]) -> str:
     rel = str(theme.get("file") or "").strip()
     if not rel:
         raise MdniceError(f"stylesheet theme {theme.get('slug')!r} has no file")
-    css_path = HUB_DIR / rel
+    base = pack_dir(str(theme.get("pack") or "theme-hub"))
+    css_path = base / rel
     if not css_path.exists():
         raise MdniceError(f"theme CSS not found: {css_path}")
     return css_path.read_text(encoding="utf-8")
+
+
+# --- Adding stylesheet theme packs -----------------------------------------
+# A theme pack is just `references/<pack>-themes.json` + `references/<pack>/`
+# (CSS files). `add-theme` vendors a CSS file/URL into a pack, auto-detects the
+# wrapper class and light/dark appearance, picks paired code/mermaid themes, and
+# registers the entry — creating the pack on first add. To add a whole group,
+# loop it or pass `--manifest`.
+
+def fetch_text(url: str, strict_tls: bool = False, timeout: int = 25) -> str:
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read().decode("utf-8", "replace")
+    except urllib.error.URLError as exc:
+        if strict_tls or not cert_error(exc):
+            raise
+        context = ssl._create_unverified_context()
+        with urllib.request.urlopen(req, timeout=timeout, context=context) as resp:
+            return resp.read().decode("utf-8", "replace")
+
+
+def _hex_luma(hex_color: str) -> float | None:
+    h = hex_color.strip().lstrip("#")
+    if len(h) == 3:
+        h = "".join(c * 2 for c in h)
+    if len(h) < 6:
+        return None
+    try:
+        r, g, b = (int(h[i : i + 2], 16) for i in (0, 2, 4))
+    except ValueError:
+        return None
+    return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255
+
+
+def detect_appearance(css: str) -> str:
+    """Guess light/dark from the root/body background colour."""
+    low = css.lower()
+    match = re.search(
+        r"(?:html|body|\.markdown-body|:root)\s*\{[^}]*?background(?:-color)?\s*:\s*#([0-9a-f]{3,8})",
+        low,
+        re.S,
+    )
+    if match:
+        luma = _hex_luma(match.group(1))
+        if luma is not None and luma < 0.4:
+            return "dark"
+    return "light"
+
+
+def detect_wrapper_class(css: str) -> tuple[str, str | None]:
+    """Guess the wrapper class a theme expects; returns (class, warning)."""
+    if "#write" in css:
+        return "", "theme references #write (Typora editor DOM); content may need a #write wrapper to style correctly"
+    for cls in ("markdown-body", "heti", "typo"):
+        if re.search(r"\." + re.escape(cls) + r"(?![\w-])", css):
+            return cls, None
+    return "", None
+
+
+def add_theme_entry(spec: dict[str, Any], strict_tls: bool = False) -> dict[str, Any]:
+    """Vendor one stylesheet theme into its pack and return the catalog entry."""
+    pack = str(spec.get("pack") or "").strip()
+    slug = str(spec.get("slug") or "").strip()
+    source = str(spec.get("from") or spec.get("source") or "").strip()
+    if not (pack and slug and source):
+        raise MdniceError(f"theme spec needs pack, slug, and from/source: {spec}")
+    category = str(spec.get("category") or "default").strip()
+
+    css = fetch_text(source, strict_tls) if source.startswith(("http://", "https://")) else Path(source).read_text(encoding="utf-8")
+    if not css.strip():
+        raise MdniceError(f"empty CSS from {source}")
+
+    rel = f"{category}/{slug}.css"
+    dest = pack_dir(pack) / rel
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(css, encoding="utf-8")
+
+    appearance = str(spec.get("appearance") or "auto")
+    if appearance == "auto":
+        appearance = detect_appearance(css)
+    raw_wrapper = spec.get("wrapperClass")
+    if raw_wrapper is None or raw_wrapper == "auto":
+        wrapper, warn = detect_wrapper_class(css)
+    else:
+        wrapper, warn = ("" if raw_wrapper in ("none", "") else str(raw_wrapper)), None
+    code_theme = str(spec.get("codeTheme") or ("atom-one-dark" if appearance == "dark" else "github"))
+    mermaid_theme = str(spec.get("mermaidTheme") or ("dark" if appearance == "dark" else DEFAULT_MERMAID_THEME))
+
+    entry = {
+        "name": str(spec.get("name") or slug),
+        "slug": slug,
+        "engine": "stylesheet",
+        "category": category,
+        "file": rel,
+        "wrapperClass": wrapper,
+        "appearance": appearance,
+        "codeTheme": code_theme,
+        "mermaidTheme": mermaid_theme,
+        "license": str(spec.get("license") or ""),
+        "source": str(spec.get("sourceUrl") or (source if source.startswith("http") else "")),
+    }
+
+    catalog_path = pack_catalog_path(pack)
+    if catalog_path.exists():
+        data = json.loads(catalog_path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            data = {}
+    else:
+        data = {"source": pack, "engine": "stylesheet", "themes": []}
+    entries = [t for t in (data.get("themes") or []) if isinstance(t, dict) and t.get("slug") != slug]
+    entries.append(entry)
+    data["themes"] = entries
+    catalog_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    label = wrapper or "(body)"
+    print(
+        f"added '{slug}' to pack '{pack}' [{category}] wrapper={label} appearance={appearance} "
+        f"code={code_theme} mermaid={mermaid_theme} -> {dest}",
+        file=sys.stderr,
+    )
+    if warn:
+        print(f"  warning: {warn}", file=sys.stderr)
+    return entry
+
+
+def add_theme(args: argparse.Namespace) -> None:
+    if args.manifest:
+        specs = json.loads(Path(args.manifest).read_text(encoding="utf-8"))
+        if not isinstance(specs, list):
+            raise MdniceError("--manifest must be a JSON array of theme specs")
+        for spec in specs:
+            spec.setdefault("pack", args.pack)
+            add_theme_entry(spec, args.strict_tls)
+        print(f"added {len(specs)} theme(s) via manifest", file=sys.stderr)
+        return
+    spec = {
+        "pack": args.pack,
+        "slug": args.slug,
+        "name": args.name,
+        "from": getattr(args, "from_"),
+        "category": args.category,
+        "license": args.license,
+        "sourceUrl": args.source_url,
+        "wrapperClass": args.wrapper_class,
+        "appearance": args.appearance,
+        "codeTheme": args.code_theme,
+        "mermaidTheme": args.mermaid_theme,
+    }
+    add_theme_entry(spec, args.strict_tls)
 
 
 def all_themes(mdnice_catalog: dict[str, Any]) -> list[dict[str, Any]]:
@@ -209,15 +392,16 @@ def all_themes(mdnice_catalog: dict[str, Any]) -> list[dict[str, Any]]:
         if isinstance(theme, dict):
             theme.setdefault("engine", "inline")
             combined.append(theme)
-    combined.extend(load_hub_themes())
+    combined.extend(load_pack_themes())
     return combined
 
 
 def theme_identity(theme: dict[str, Any]) -> Any:
-    """Dedup/identity key: MDNice themes use themeId, hub themes use slug."""
+    """Dedup/identity key: MDNice themes use themeId; pack themes use pack+slug so
+    two packs can reuse the same slug without colliding."""
     if isinstance(theme.get("themeId"), int):
         return ("id", theme["themeId"])
-    return ("slug", str(theme.get("slug") or theme.get("name") or ""))
+    return ("slug", str(theme.get("pack") or ""), str(theme.get("slug") or theme.get("name") or ""))
 
 
 # --- Per-theme CSS file storage --------------------------------------------
@@ -374,7 +558,7 @@ def build_catalog(args: argparse.Namespace) -> None:
 def theme_label(theme: dict[str, Any]) -> str:
     name = clean_text(str(theme.get("name") or "Unnamed"))
     if str(theme.get("engine")) == "stylesheet":
-        bits = [str(theme.get("slug")), name, "stylesheet"]
+        bits = [str(theme.get("slug")), name, f"pack:{theme.get('pack')}"]
         category = theme.get("category")
         if category:
             bits.append(str(category))
@@ -434,9 +618,10 @@ def theme_ref_label(theme: dict[str, Any]) -> str:
 
 
 def resolve_themes(catalog: dict[str, Any], refs: list[str]) -> list[dict[str, Any]]:
-    # Search both engines: MDNice inline themes (themeId) and stylesheet hub
-    # themes (slug). A digit ref only matches an MDNice themeId; everything else
-    # matches a name (exact, then substring) or an exact hub slug.
+    # Search both engines: MDNice inline themes (themeId) and pack stylesheet
+    # themes (slug, optionally pack-qualified as "pack:slug"). A digit ref only
+    # matches an MDNice themeId; everything else matches a name (exact, then
+    # substring) or a slug.
     themes = all_themes(catalog)
     if not themes:
         raise MdniceError("catalog has no themes list")
@@ -445,9 +630,26 @@ def resolve_themes(catalog: dict[str, Any], refs: list[str]) -> list[dict[str, A
     used: set[Any] = set()
     for ref in refs:
         match: dict[str, Any] | None = None
+        # "pack:slug" disambiguates a slug shared across packs.
+        pack_q = None
+        slug_ref = ref
+        if ":" in ref and not ref.isdigit():
+            maybe_pack, _, maybe_slug = ref.partition(":")
+            if maybe_pack and maybe_slug:
+                pack_q, slug_ref = maybe_pack.strip().casefold(), maybe_slug.strip()
         if ref.isdigit():
             wanted = int(ref)
             match = next((theme for theme in themes if theme.get("themeId") == wanted), None)
+        elif pack_q is not None:
+            folded = clean_text(slug_ref).casefold()
+            hits = [
+                theme for theme in themes
+                if str(theme.get("pack") or "").casefold() == pack_q
+                and str(theme.get("slug") or "").casefold() == folded
+            ]
+            match = hits[0] if len(hits) == 1 else None
+            if len(hits) > 1:
+                raise MdniceError(f"theme selector {ref!r} is ambiguous within pack {pack_q!r}")
         else:
             folded = clean_text(ref).casefold()
             slug_hit = [theme for theme in themes if str(theme.get("slug") or "").casefold() == folded]
@@ -1692,7 +1894,7 @@ def stylesheet_document(
     path). The content is placed in the theme's required wrapper class (e.g.
     `.markdown-body` for GitHub, `.heti`/`.typo` for those themes, or directly in
     <body> for classless themes), and a paired code-highlight theme is appended last."""
-    theme_css = hub_theme_css(theme)
+    theme_css = pack_theme_css(theme)
     wrapper_class = str(theme.get("wrapperClass") or "").strip()
     prefix = f".{wrapper_class}" if wrapper_class else "body"
     code_key, mmd_theme = resolve_stylesheet_styles(theme, code_theme, mermaid_theme)
@@ -2018,6 +2220,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     split.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
     split.set_defaults(func=split_catalog)
+
+    add = subparsers.add_parser(
+        "add-theme",
+        help="vendor a standalone CSS theme into a pack (e.g. mweb-theme); auto-detects wrapper class and light/dark",
+    )
+    add.add_argument("--pack", default="theme-hub", help="pack name -> references/<pack>-themes.json + references/<pack>/ (created if new)")
+    add.add_argument("--from", dest="from_", help="CSS file path or http(s) URL")
+    add.add_argument("--slug", help="unique theme slug within the pack (also the CSS filename)")
+    add.add_argument("--name", help="display name (default: slug)")
+    add.add_argument("--category", default="default", help="group within the pack, e.g. editorial/dark/minimal")
+    add.add_argument("--license", help="SPDX license id, e.g. MIT")
+    add.add_argument("--source-url", dest="source_url", help="upstream URL for provenance")
+    add.add_argument("--wrapper-class", help="override auto-detect; 'none' for classless/body themes")
+    add.add_argument("--appearance", choices=["auto", "light", "dark"], default="auto")
+    add.add_argument("--code-theme", choices=sorted(CODE_THEMES.keys()), help="override paired code theme")
+    add.add_argument("--mermaid-theme", choices=list(MERMAID_THEMES), help="override paired mermaid theme")
+    add.add_argument("--manifest", help="JSON array of theme specs for batch-adding a whole group")
+    add.add_argument("--strict-tls", action="store_true")
+    add.set_defaults(func=add_theme)
 
     render = subparsers.add_parser("render", help="render Markdown to themed HTML")
     render.add_argument("markdown", type=Path)

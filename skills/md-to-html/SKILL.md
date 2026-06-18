@@ -38,6 +38,29 @@ Theme selectors accept MDNice IDs, exact names, unique name substrings, or style
 
 These themes rely on stylesheet cascade, CSS variables, `@media (prefers-color-scheme)`, and (for some) wrapper classes, so their CSS is **not** inlined — output is for blogs / standalone web pages / Typora-style publishing, not WeChat paste. The renderer places content in the theme's required wrapper (`.markdown-body` for GitHub/Smartisan, `.heti`/`.typo` for those, plain `<body>` for classless themes) automatically. `heti`, `simple`, `latex`, `tufte`, and the minimal themes auto-switch to dark under OS dark mode; `latex`/`tufte`/`heti` declare `@font-face` with non-vendored fonts and fall back to system fonts. See `references/theme-hub/NOTICE.md` for provenance and licensing.
 
+## Theme Packs (extending with new groups)
+
+Themes are organised into **packs**. `mdnice` is the built-in inline pack; `theme-hub` is the first stylesheet pack. A pack is simply a convention — no code change is needed to add one:
+
+```text
+references/<pack>-themes.json   # catalog: { "themes": [ {slug, name, category, file, ...} ] }
+references/<pack>/<category>/<slug>.css   # vendored CSS, `file` is relative to references/<pack>/
+```
+
+Any `references/*-themes.json` (except `mdnice`) is auto-discovered at load time. To add a new pack such as `mweb-theme`, use the `add-theme` command — it vendors the CSS, **auto-detects** the wrapper class (`.markdown-body`/`.heti`/`.typo`/classless `body`) and light/dark appearance, pairs a code/mermaid theme, and registers the entry (creating the pack on first add):
+
+```bash
+# one theme (CSS path or http(s) URL); creates references/mweb-theme-themes.json + references/mweb-theme/
+python3 skills/md-to-html/scripts/md_to_html.py add-theme \
+  --pack mweb-theme --slug mweb-gray --name "MWeb Gray" --category editor \
+  --from ./mweb-gray.css --license MIT --source-url https://example.com/mweb
+
+# a whole group at once via a JSON manifest (array of {slug, name, from, category, license, ...})
+python3 skills/md-to-html/scripts/md_to_html.py add-theme --pack mweb-theme --manifest ./mweb.json
+```
+
+Override auto-detection with `--wrapper-class` (or `none`), `--appearance light|dark`, `--code-theme`, `--mermaid-theme`. Select a pack theme by slug, or `pack:slug` if a slug is shared across packs (e.g. `mweb-theme:github`). Vendoring third-party CSS: keep the upstream license and record provenance (add a `license`/`source-url`, mirroring `theme-hub/NOTICE.md`).
+
 ## Code Blocks and Diagrams
 
 - **Code highlighting**: code blocks are tokenized with Pygments into `.hljs-*` spans. The code BLOCK colours (background + token colours) are a separate "highlight.js theme" dimension. The skill ships a registry of standard themes (`atom-one-dark`, `atom-one-light`, `github`, `vs2015`, `monokai`, `dracula`) and pairs each layout/stylesheet theme with a fitting one (MDNice 极客黑 → atom-one-dark, 科技蓝 → vs2015; stylesheet `github-dark` → atom-one-dark, light themes → github / atom-one-light). For MDNice themes the code CSS is inlined onto each token span (survives WeChat/Zhihu paste); for stylesheet themes it is appended as a `<style>` block scoped to the theme's wrapper so it wins the cascade and owns the code block consistently. Override with `--code-theme`.

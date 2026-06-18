@@ -140,9 +140,18 @@ The inliner supports the selector shapes used by the cached MDNice themes:
 
 CSS constructs that cannot be represented as inline element styles, or selectors outside the supported MDNice subset, are skipped rather than emitted as a theme stylesheet. The output still keeps a small compatibility `<style>` block for page reset, responsive media behavior, tables, images, and code-highlight fallback colors.
 
+## Theme Packs
+
+Themes are grouped into **packs**, discovered by convention so new groups need no code change:
+
+- `mdnice` — the built-in inline pack (`references/mdnice-themes.json` + `references/mdnice-themes/`).
+- any `references/<pack>-themes.json` + `references/<pack>/` — an auto-discovered stylesheet pack (`theme-hub`, and e.g. `mweb-theme`). `discover_packs` globs `references/*-themes.json` (excluding `mdnice`); `load_pack_themes` loads them all and tags each theme with its `pack`, which `pack_theme_css` uses to resolve `references/<pack>/<file>`. Theme identity is `pack`+`slug`, so packs can reuse slugs; `resolve_themes` accepts `pack:slug` to disambiguate.
+
+The `add-theme` command vendors a CSS file/URL into a pack and registers it: `detect_wrapper_class` (scans for `.markdown-body`/`.heti`/`.typo`/`#write`) and `detect_appearance` (root/body background luma) fill in the metadata, with CLI overrides and a `--manifest` batch mode for adding a whole group.
+
 ## Stylesheet Engine (Theme Hub)
 
-`stylesheet`-engine themes are vendored open-source CSS files under `references/theme-hub/`, catalogued in `references/theme-hub-themes.json` (`slug`, `category`, `file`, `wrapperClass`, `appearance`, `codeTheme`, `mermaidTheme`, `license`, `source`). They are the inverse of the inline engine: instead of flattening CSS onto elements, `stylesheet_document` emits the theme CSS **verbatim** in a `<style>` block over plain semantic HTML. This is required because these themes depend on stylesheet-only behaviour — the cascade, `:root` CSS variables, `@media (prefers-color-scheme: dark)`, `@font-face`, and wrapper-class scoping — none of which can be inlined.
+`stylesheet`-engine themes are vendored open-source CSS files under `references/<pack>/` (e.g. `theme-hub/`), catalogued in `references/<pack>-themes.json` (`slug`, `category`, `file`, `wrapperClass`, `appearance`, `codeTheme`, `mermaidTheme`, `license`, `source`). They are the inverse of the inline engine: instead of flattening CSS onto elements, `stylesheet_document` emits the theme CSS **verbatim** in a `<style>` block over plain semantic HTML. This is required because these themes depend on stylesheet-only behaviour — the cascade, `:root` CSS variables, `@media (prefers-color-scheme: dark)`, `@font-face`, and wrapper-class scoping — none of which can be inlined.
 
 DOM differs from the inline engine because `render_markdown(text, flavor="semantic")` is used:
 
